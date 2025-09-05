@@ -15,8 +15,7 @@ pygame.display.set_caption(f"Name Entry")
 
 FONT = pygame.font.SysFont(None, 28)
 BIG = pygame.font.SysFont(None, 36)
-
-# Colors
+# co
 BG = (235, 235, 240)
 TEXT = (20, 20, 20)
 LABEL = (90, 90, 90)
@@ -26,12 +25,12 @@ BUTTON_BG = (70, 130, 180)
 BUTTON_TEXT = (255, 255, 255)
 INPUT_BG = (255, 255, 255)
 
-# UI layout (top-centered group)
+
 input_w, input_h = 360, 44
 button_w, button_h = 140, 44
 
 label_surf = FONT.render("Username", True, LABEL)
-# Top-center label
+
 label_pos = (WIDTH // 2 - label_surf.get_width() // 2, 24)
 
 input_rect = pygame.Rect(0, 0, input_w, input_h)
