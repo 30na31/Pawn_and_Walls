@@ -1,0 +1,35 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run Pawn Runner (client only)",
+			"type": "shell",
+			"command": "python",
+			"args": [
+				"-X",
+				"utf8",
+				"main.py"
+			],
+			"isBackground": false,
+			"problemMatcher": [
+				"$python"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Run client (main.py)",
+			"type": "shell",
+			"command": "python",
+			"args": [
+				"-X",
+				"utf8",
+				"main.py"
+			],
+			"isBackground": false,
+			"problemMatcher": [
+				"$python"
+			],
+			"group": "build"
+		}
+	]
+}

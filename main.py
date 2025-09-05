@@ -7,7 +7,7 @@ import json
 from typing import Optional, List, Dict, Any, Tuple, cast
 
 pygame.init()
-WIDTH, HEIGHT = 800, 600
+WIDTH, HEIGHT = 800, 720
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption(f"Name Entry")
 
@@ -37,17 +37,31 @@ input_rect = pygame.Rect(0, 0, input_w, input_h)
 input_rect.centerx = WIDTH // 2
 input_rect.top = label_pos[1] + label_surf.get_height() + 12
 
+# Server address label and input
+srv_label_surf = FONT.render("Server (host:port)", True, LABEL)
+srv_label_pos = (WIDTH // 2 - srv_label_surf.get_width() // 2, input_rect.bottom + 16)
+server_rect = pygame.Rect(0, 0, input_w, input_h)
+server_rect.centerx = WIDTH // 2
+server_rect.top = srv_label_pos[1] + srv_label_surf.get_height() + 8
+
 button_rect = pygame.Rect(0, 0, button_w, button_h)
 button_rect.centerx = WIDTH // 2
-button_rect.top = input_rect.bottom + 12
+button_rect.top = server_rect.bottom + 16
 
-active = False
+active_name = False
+active_server = False
 text = ""
+server_text = "127.0.0.1:5000"
 
 clock = pygame.time.Clock()
 
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 5000
+
+def set_server(host: str, port: int) -> None:
+    global SERVER_HOST, SERVER_PORT
+    SERVER_HOST = host
+    SERVER_PORT = port
 
 def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional[socket.socket] = None) -> None:
     # Draw a 9x9 chessboard (green/white) centered on the screen
@@ -96,6 +110,32 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
         "black": (row_9, col_e),
     }
 
+    # Turn management: white starts
+    turn: str = "white"
+
+    # View orientation: flip for black so they see their pawn from the bottom
+    flip_view: bool = (your_color == "black")
+
+    # Helpers to map between logical board (r,c) and displayed squares depending on flip
+    def to_display_rc(r: int, c: int) -> Tuple[int, int]:
+        if not flip_view:
+            return r, c
+        return (squares - 1 - r, squares - 1 - c)
+
+    def from_display_rc(dr: int, dc: int) -> Tuple[int, int]:
+        # inverse of to_display_rc (same when rotating 180 degrees)
+        if not flip_view:
+            return dr, dc
+        return (squares - 1 - dr, squares - 1 - dc)
+
+    def mouse_to_logical(mx: int, my: int) -> Optional[Tuple[int, int]]:
+        dc = (mx - left) // sq
+        dr = (my - top) // sq
+        if 0 <= dr < squares and 0 <= dc < squares:
+            r, c = from_display_rc(int(dr), int(dc))
+            return (r, c)
+        return None
+
     # Drag state
     dragging = False
     drag_color: Optional[str] = None
@@ -106,12 +146,54 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
     state_lock = threading.Lock()
     pending_moves: List[Dict[str, Any]] = []
 
+    # Visual feedback: remember last move (color, to_rc) with a fade timer
+    last_move: Optional[Tuple[str, Tuple[int, int], int]] = None  # (color, to, timestamp_ms)
+
     def legal_moves(r: int, c: int) -> List[Tuple[int, int]]:
-        candidates = [(r-1, c), (r+1, c), (r, c-1), (r, c+1)]
-        in_bounds = [(rr, cc) for rr, cc in candidates if 0 <= rr < squares and 0 <= cc < squares]
-        # cannot move into occupied square
+        # Cardinal step moves
+        deltas = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+        step_candidates = [(r + dr, c + dc) for dr, dc in deltas]
+        in_bounds_steps = [(rr, cc) for rr, cc in step_candidates if 0 <= rr < squares and 0 <= cc < squares]
+
         occ = {positions["white"], positions["black"]}
-        return [(rr, cc) for rr, cc in in_bounds if (rr, cc) not in occ]
+        moves: List[Tuple[int, int]] = [(rr, cc) for rr, cc in in_bounds_steps if (rr, cc) not in occ]
+
+        # Jump rule: if opponent pawn is exactly one step away in a cardinal direction,
+        # you may jump over it to the next square if that landing square is in-bounds and empty.
+        mover_color: Optional[str] = None
+        if positions["white"] == (r, c):
+            mover_color = "white"
+            opponent_pos = positions["black"]
+        elif positions["black"] == (r, c):
+            mover_color = "black"
+            opponent_pos = positions["white"]
+        else:
+            opponent_pos = None  # type: ignore
+
+        if mover_color is not None and opponent_pos is not None:
+            for dr, dc in deltas:
+                adj = (r + dr, c + dc)
+                land = (r + 2 * dr, c + 2 * dc)
+                if adj == opponent_pos:
+                    lr, lc = land
+                    if 0 <= lr < squares and 0 <= lc < squares and land not in occ:
+                        moves.append(land)
+
+        # Remove duplicates while preserving order
+        seen = set()
+        uniq_moves: List[Tuple[int, int]] = []
+        for m in moves:
+            if m not in seen:
+                seen.add(m)
+                uniq_moves.append(m)
+        return uniq_moves
+
+    def piece_color_at(r: int, c: int) -> Optional[str]:
+        if positions["white"] == (r, c):
+            return "white"
+        if positions["black"] == (r, c):
+            return "black"
+        return None
 
     def send_move(from_rc: Tuple[int, int], to_rc: Tuple[int, int], color: str) -> None:
         if not sock:
@@ -119,6 +201,8 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
         try:
             msg = json.dumps({"type": "move", "from": list(from_rc), "to": list(to_rc), "color": color}).encode("utf-8") + b"\n"
             sock.sendall(msg)
+            # Log locally to help debug networking
+            print(f"[client] sent move: {color} {from_rc} -> {to_rc}")
         except Exception:
             pass
 
@@ -164,47 +248,7 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
 
     running_board = True
     while running_board:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                pygame.quit()
-                sys.exit()
-            if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
-                    running_board = False
-            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                mx, my = event.pos
-                # Determine clicked square
-                col = (mx - left) // sq
-                row = (my - top) // sq
-                if 0 <= row < squares and 0 <= col < squares:
-                    # Check if clicking your piece (if color known), else allow white by default
-                    yours = your_color or "white"
-                    pr, pc = positions[yours]
-                    if row == pr and col == pc:
-                        dragging = True
-                        drag_color = yours
-                        # drag offset to keep image centered under cursor
-                        drag_offset = (mx - (left + pc * sq + sq // 2), my - (top + pr * sq + sq // 2))
-                        drag_pos_px = (mx, my)
-            if event.type == pygame.MOUSEMOTION and dragging:
-                drag_pos_px = event.pos
-            if event.type == pygame.MOUSEBUTTONUP and event.button == 1 and dragging:
-                mx, my = event.pos
-                col = (mx - left) // sq
-                row = (my - top) // sq
-                yours = drag_color or (your_color or "white")
-                from_rc = positions[yours]
-                lm = legal_moves(*from_rc)
-                if 0 <= row < squares and 0 <= col < squares and (row, col) in lm:
-                    positions[yours] = (row, col)
-                    send_move(from_rc, (row, col), yours)
-                # end drag in any case
-                dragging = False
-                drag_color = None
-
-        screen.fill(BG)
-
-        # Apply any pending opponent moves
+        # First, apply any pending opponent moves so the UI reflects the latest state
         if sock is not None:
             with state_lock:
                 while pending_moves:
@@ -221,14 +265,70 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
                             to_list = cast(List[Any], to_any)
                             tr = (int(to_list[0]), int(to_list[1]))
                             positions[color] = tr
+                            # Record last move and log for clarity
+                            last_move = (color, tr, pygame.time.get_ticks())
+                            print(f"[client] received move: {color} -> {tr}")
+                            # Toggle turn after any valid move
+                            turn = "black" if color == "white" else "white"
                         except Exception:
                             pass
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit()
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    running_board = False
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                mx, my = event.pos
+                # Determine clicked logical square
+                maybe_rc = mouse_to_logical(mx, my)
+                if maybe_rc is not None:
+                    lr, lc = maybe_rc
+                    clicked_color = piece_color_at(lr, lc)
+                    if (
+                        clicked_color is not None
+                        and clicked_color == turn
+                        and (your_color is None or clicked_color == your_color)
+                    ):
+                        dragging = True
+                        drag_color = clicked_color
+                        # drag offset to keep image centered under cursor (use display coords)
+                        d_r, d_c = to_display_rc(lr, lc)
+                        center_x = left + d_c * sq + sq // 2
+                        center_y = top + d_r * sq + sq // 2
+                        drag_offset = (mx - center_x, my - center_y)
+                        drag_pos_px = (mx, my)
+            if event.type == pygame.MOUSEMOTION and dragging:
+                drag_pos_px = event.pos
+            if event.type == pygame.MOUSEBUTTONUP and event.button == 1 and dragging:
+                mx, my = event.pos
+                dest = mouse_to_logical(mx, my)
+                yours = drag_color or (your_color or "white")
+                from_rc = positions[yours]
+                lm = legal_moves(*from_rc)
+                if dest is not None:
+                    row, col = dest
+                    if (row, col) in lm:
+                        positions[yours] = (row, col)
+                        send_move(from_rc, (row, col), yours)
+                        last_move = (yours, (row, col), pygame.time.get_ticks())
+                        # Switch turn after a successful move
+                        turn = "black" if yours == "white" else "white"
+                # end drag in any case
+                dragging = False
+                drag_color = None
+
+        screen.fill(BG)
 
         # Optional: show the entered name at the top if provided
         if name_value:
             label = str(name_value)
             if your_color:
                 label += f" ({your_color})"
+            # Show current turn
+            label += f"  •  Turn: {turn.title()}"
             name_surf = BIG.render(label, True, TEXT)
             screen.blit(name_surf, (WIDTH // 2 - name_surf.get_width() // 2, top - 30))
 
@@ -243,21 +343,36 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
         if dragging and drag_color:
             from_r, from_c = positions[drag_color]
             for rr, cc in legal_moves(from_r, from_c):
-                hrect = pygame.Rect(left + cc * sq, top + rr * sq, sq, sq)
+                d_rr, d_cc = to_display_rc(rr, cc)
+                hrect = pygame.Rect(left + d_cc * sq, top + d_rr * sq, sq, sq)
                 pygame.draw.rect(screen, (255, 215, 0), hrect, width=4, border_radius=4)
 
         # Draw pieces, with dragged piece following cursor
         def draw_piece(img: Optional[pygame.Surface], pos_rc: Tuple[int, int], fallback_color: Tuple[int, int, int]):
             if img:
                 r, c = pos_rc
-                rect = pygame.Rect(left + c * sq, top + r * sq, sq, sq)
+                d_r, d_c = to_display_rc(r, c)
+                rect = pygame.Rect(left + d_c * sq, top + d_r * sq, sq, sq)
                 ir = img.get_rect()
                 ir.center = rect.center
                 screen.blit(img, (ir.x, ir.y))
             else:
                 r, c = pos_rc
-                rect = pygame.Rect(left + c * sq, top + r * sq, sq, sq)
+                d_r, d_c = to_display_rc(r, c)
+                rect = pygame.Rect(left + d_c * sq, top + d_r * sq, sq, sq)
                 pygame.draw.circle(screen, fallback_color, rect.center, sq // 3)
+
+        # Last move highlight (2 seconds)
+        now_ms = pygame.time.get_ticks()
+        if last_move is not None:
+            mv_color, mv_to, ts = last_move
+            if now_ms - ts <= 2000:
+                lr, lc = mv_to
+                d_r, d_c = to_display_rc(lr, lc)
+                hl = pygame.Rect(left + d_c * sq + 4, top + d_r * sq + 4, sq - 8, sq - 8)
+                pygame.draw.rect(screen, (255, 215, 0), hl, width=3, border_radius=6)
+            else:
+                last_move = None
 
         # Non-dragged piece first
         if not (dragging and drag_color == "white"):
@@ -277,7 +392,17 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
                 pygame.draw.circle(screen, (255, 0, 0), (drag_pos_px[0], drag_pos_px[1]), sq // 3)
 
         # Helper text
-        screen.blit(title_text, (WIDTH // 2 - title_text.get_width() // 2, top + board_size + 10))
+        # Turn status message (UX hint)
+        if your_color:
+            turn_msg = "Your move" if turn == your_color else "Opponent's move"
+        else:
+            # local/offline: show whose move
+            turn_msg = f"{turn.title()}'s move"
+        turn_surf = FONT.render(turn_msg, True, LABEL)
+        screen.blit(turn_surf, (WIDTH // 2 - turn_surf.get_width() // 2, top + board_size + 10))
+
+        # Helper text below
+        screen.blit(title_text, (WIDTH // 2 - title_text.get_width() // 2, top + board_size + 32))
 
         pygame.display.flip()
         clock.tick(60)
@@ -446,22 +571,61 @@ while True:
 
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             if input_rect.collidepoint(event.pos):
-                active = True
+                active_name = True
+                active_server = False
+            elif server_rect.collidepoint(event.pos):
+                active_server = True
+                active_name = False
             else:
-                active = False
+                active_name = False
+                active_server = False
 
             if button_rect.collidepoint(event.pos):
+                # Parse server_text host:port if possible
+                host = server_text.strip()
+                port = 5000
+                if ":" in host:
+                    try:
+                        h, p = host.rsplit(":", 1)
+                        if h:
+                            host = h
+                        port = int(p)
+                    except Exception:
+                        pass
+                # Update server settings
+                set_server(host, port)
                 matchmaking_screen(text)
 
-        if event.type == pygame.KEYDOWN and active:
-            if event.key == pygame.K_RETURN:
-                matchmaking_screen(text)
-            elif event.key == pygame.K_BACKSPACE:
-                text = text[:-1]
-            else:
-                # Append printable character
-                if event.unicode.isprintable():
-                    text += event.unicode
+        if event.type == pygame.KEYDOWN:
+            if active_name:
+                if event.key == pygame.K_RETURN:
+                    # Submit
+                    host = server_text.strip()
+                    port = 5000
+                    if ":" in host:
+                        try:
+                            h, p = host.rsplit(":", 1)
+                            if h:
+                                host = h
+                            port = int(p)
+                        except Exception:
+                            pass
+                    set_server(host, port)
+                    matchmaking_screen(text)
+                elif event.key == pygame.K_BACKSPACE:
+                    text = text[:-1]
+                else:
+                    if event.unicode.isprintable():
+                        text += event.unicode
+            elif active_server:
+                if event.key == pygame.K_RETURN:
+                    # Do nothing special; wait for click Submit
+                    pass
+                elif event.key == pygame.K_BACKSPACE:
+                    server_text = server_text[:-1]
+                else:
+                    if event.unicode.isprintable():
+                        server_text += event.unicode
 
     screen.fill(BG)
 
@@ -478,7 +642,7 @@ while True:
     pygame.draw.rect(screen, INPUT_BG, input_rect, border_radius=6)
     pygame.draw.rect(
         screen,
-        BORDER_ACTIVE if active else BORDER_INACTIVE,
+    BORDER_ACTIVE if active_name else BORDER_INACTIVE,
         input_rect,
         width=2,
         border_radius=6
@@ -489,6 +653,23 @@ while True:
     clip.width = input_rect.width - 12
     screen.set_clip(input_rect.inflate(-12, -8))
     screen.blit(txt_surf, (input_rect.x + 8, input_rect.y + 6))
+    screen.set_clip(None)
+
+    # Server address label and input
+    screen.blit(srv_label_surf, srv_label_pos)
+    pygame.draw.rect(screen, INPUT_BG, server_rect, border_radius=6)
+    pygame.draw.rect(
+        screen,
+        BORDER_ACTIVE if active_server else BORDER_INACTIVE,
+        server_rect,
+        width=2,
+        border_radius=6
+    )
+    srv_surf = BIG.render(server_text, True, TEXT)
+    srv_clip = srv_surf.get_rect()
+    srv_clip.width = server_rect.width - 12
+    screen.set_clip(server_rect.inflate(-12, -8))
+    screen.blit(srv_surf, (server_rect.x + 8, server_rect.y + 6))
     screen.set_clip(None)
 
     # Submit button

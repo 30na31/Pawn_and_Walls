@@ -140,6 +140,7 @@ def handle_client(conn: socket.socket, addr: Tuple[str, int]) -> None:
 		if pref not in ("white", "black", "any"):
 			pref = "any"
 
+		print(f"[server] join from {addr}: name='{name}', pref='{pref}'")
 		me = Client(conn, addr, name, pref)
 
 		with cv:
@@ -154,6 +155,7 @@ def handle_client(conn: socket.socket, addr: Tuple[str, int]) -> None:
 					black_client.peer = white_client
 					white_client.ready.set()
 					black_client.ready.set()
+					print(f"[server] matched: white='{white_client.name}' vs black='{black_client.name}'")
 					cv.notify_all()
 					break
 				# If another thread already matched us, stop trying
@@ -174,6 +176,7 @@ def handle_client(conn: socket.socket, addr: Tuple[str, int]) -> None:
 		# Send start to this client
 		try:
 			send_line(me.conn, {"type": "start", "you": me.role, "opponent": me.peer.name})
+			print(f"[server] start sent to '{me.name}': you='{me.role}', opponent='{me.peer.name}'")
 		except Exception:
 			return
 
@@ -202,9 +205,19 @@ def handle_client(conn: socket.socket, addr: Tuple[str, int]) -> None:
 						payload_dict: Dict[str, Any] = cast(Dict[str, Any], payload)
 						p_type = str(payload_dict.get("type") or "")
 						if p_type == "move":
+							# Validate peer socket before attempting to send
 							try:
-								send_line(peer_conn, payload_dict)
+								if (peer_conn is None) or (getattr(peer_conn, 'fileno', lambda: -1)() == -1) or _conn_closed(peer_conn):
+									print("[server] peer socket invalid or closed; stopping relay")
+									break
 							except Exception:
+								print("[server] peer socket check failed; stopping relay")
+								break
+							try:
+								print(f"[server] relay move from '{me.name}' to '{me.peer.name}': {payload_dict}")
+								send_line(peer_conn, payload_dict)
+							except Exception as e:
+								print(f"[server] relay failed: {e}")
 								break
 			except socket.timeout:
 				# also check if peer closed
