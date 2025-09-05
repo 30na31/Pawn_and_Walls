@@ -7,7 +7,7 @@ import json
 from typing import Optional, List, Dict, Any, Tuple, cast
 
 pygame.init()
-WIDTH, HEIGHT = 800, 720
+WIDTH, HEIGHT = 800, 600
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption(f"Name Entry")
 
@@ -37,31 +37,17 @@ input_rect = pygame.Rect(0, 0, input_w, input_h)
 input_rect.centerx = WIDTH // 2
 input_rect.top = label_pos[1] + label_surf.get_height() + 12
 
-# Server address label and input
-srv_label_surf = FONT.render("Server (host:port)", True, LABEL)
-srv_label_pos = (WIDTH // 2 - srv_label_surf.get_width() // 2, input_rect.bottom + 16)
-server_rect = pygame.Rect(0, 0, input_w, input_h)
-server_rect.centerx = WIDTH // 2
-server_rect.top = srv_label_pos[1] + srv_label_surf.get_height() + 8
-
 button_rect = pygame.Rect(0, 0, button_w, button_h)
 button_rect.centerx = WIDTH // 2
-button_rect.top = server_rect.bottom + 16
+button_rect.top = input_rect.bottom + 12
 
-active_name = False
-active_server = False
+active = False
 text = ""
-server_text = "127.0.0.1:5000"
 
 clock = pygame.time.Clock()
 
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 5000
-
-def set_server(host: str, port: int) -> None:
-    global SERVER_HOST, SERVER_PORT
-    SERVER_HOST = host
-    SERVER_PORT = port
 
 def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional[socket.socket] = None) -> None:
     # Draw a 9x9 chessboard (green/white) centered on the screen
@@ -571,61 +557,21 @@ while True:
 
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             if input_rect.collidepoint(event.pos):
-                active_name = True
-                active_server = False
-            elif server_rect.collidepoint(event.pos):
-                active_server = True
-                active_name = False
+                active = True
             else:
-                active_name = False
-                active_server = False
+                active = False
 
             if button_rect.collidepoint(event.pos):
-                # Parse server_text host:port if possible
-                host = server_text.strip()
-                port = 5000
-                if ":" in host:
-                    try:
-                        h, p = host.rsplit(":", 1)
-                        if h:
-                            host = h
-                        port = int(p)
-                    except Exception:
-                        pass
-                # Update server settings
-                set_server(host, port)
                 matchmaking_screen(text)
 
-        if event.type == pygame.KEYDOWN:
-            if active_name:
-                if event.key == pygame.K_RETURN:
-                    # Submit
-                    host = server_text.strip()
-                    port = 5000
-                    if ":" in host:
-                        try:
-                            h, p = host.rsplit(":", 1)
-                            if h:
-                                host = h
-                            port = int(p)
-                        except Exception:
-                            pass
-                    set_server(host, port)
-                    matchmaking_screen(text)
-                elif event.key == pygame.K_BACKSPACE:
-                    text = text[:-1]
-                else:
-                    if event.unicode.isprintable():
-                        text += event.unicode
-            elif active_server:
-                if event.key == pygame.K_RETURN:
-                    # Do nothing special; wait for click Submit
-                    pass
-                elif event.key == pygame.K_BACKSPACE:
-                    server_text = server_text[:-1]
-                else:
-                    if event.unicode.isprintable():
-                        server_text += event.unicode
+        if event.type == pygame.KEYDOWN and active:
+            if event.key == pygame.K_RETURN:
+                matchmaking_screen(text)
+            elif event.key == pygame.K_BACKSPACE:
+                text = text[:-1]
+            else:
+                if event.unicode.isprintable():
+                    text += event.unicode
 
     screen.fill(BG)
 
@@ -642,7 +588,7 @@ while True:
     pygame.draw.rect(screen, INPUT_BG, input_rect, border_radius=6)
     pygame.draw.rect(
         screen,
-    BORDER_ACTIVE if active_name else BORDER_INACTIVE,
+        BORDER_ACTIVE if active else BORDER_INACTIVE,
         input_rect,
         width=2,
         border_radius=6
@@ -655,22 +601,7 @@ while True:
     screen.blit(txt_surf, (input_rect.x + 8, input_rect.y + 6))
     screen.set_clip(None)
 
-    # Server address label and input
-    screen.blit(srv_label_surf, srv_label_pos)
-    pygame.draw.rect(screen, INPUT_BG, server_rect, border_radius=6)
-    pygame.draw.rect(
-        screen,
-        BORDER_ACTIVE if active_server else BORDER_INACTIVE,
-        server_rect,
-        width=2,
-        border_radius=6
-    )
-    srv_surf = BIG.render(server_text, True, TEXT)
-    srv_clip = srv_surf.get_rect()
-    srv_clip.width = server_rect.width - 12
-    screen.set_clip(server_rect.inflate(-12, -8))
-    screen.blit(srv_surf, (server_rect.x + 8, server_rect.y + 6))
-    screen.set_clip(None)
+    # Removed server address input; fixed localhost settings
 
     # Submit button
     pygame.draw.rect(screen, BUTTON_BG, button_rect, border_radius=6)
