@@ -204,25 +204,14 @@ def handle_client(conn: socket.socket, addr: Tuple[str, int]) -> None:
 					if isinstance(payload, dict):
 						payload_dict: Dict[str, Any] = cast(Dict[str, Any], payload)
 						p_type = str(payload_dict.get("type") or "")
-						if p_type == "move":
-							# Validate peer socket before attempting to send
+						if p_type in ("move", "wall", "rematch", "rematch_start", "win"):
 							try:
-								if (peer_conn is None) or (getattr(peer_conn, 'fileno', lambda: -1)() == -1) or _conn_closed(peer_conn):
-									print("[server] peer socket invalid or closed; stopping relay")
-									break
-							except Exception:
-								print("[server] peer socket check failed; stopping relay")
-								break
-							try:
-								print(f"[server] relay move from '{me.name}' to '{me.peer.name}': {payload_dict}")
+								print(f"[server] relay {p_type} from '{me.name}' to '{me.peer.name}': {payload_dict}")
 								send_line(peer_conn, payload_dict)
 							except Exception as e:
 								print(f"[server] relay failed: {e}")
 								break
 			except socket.timeout:
-				# also check if peer closed
-				if _conn_closed(peer_conn):
-					break
 				continue
 			except Exception:
 				break

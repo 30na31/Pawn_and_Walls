@@ -7,8 +7,8 @@ import json
 from typing import Optional, List, Dict, Any, Tuple, cast
 
 pygame.init()
-WIDTH, HEIGHT = 800, 600
-screen = pygame.display.set_mode((WIDTH, HEIGHT))
+WIDTH, HEIGHT = 1100, 900
+screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.RESIZABLE)
 pygame.display.set_caption(f"Name Entry")
 
 
@@ -31,7 +31,7 @@ button_w, button_h = 140, 44
 
 label_surf = FONT.render("Username", True, LABEL)
 
-label_pos = (WIDTH // 2 - label_surf.get_width() // 2, 24)
+label_pos = [WIDTH // 2 - label_surf.get_width() // 2, 24]
 
 input_rect = pygame.Rect(0, 0, input_w, input_h)
 input_rect.centerx = WIDTH // 2
@@ -58,12 +58,17 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
     pygame.display.set_caption(caption_label)
     squares = 9
     margin = 40  # visual padding around the board
-    board_size = min(WIDTH, HEIGHT) - margin * 2
-    sq = board_size // squares
-    # Recompute board size to be a multiple of square size, then center
-    board_size = sq * squares
-    left = (WIDTH - board_size) // 2
-    top = (HEIGHT - board_size) // 2
+    # We'll recompute layout dynamically each frame using current window size
+    def compute_layout():
+        cur_w, cur_h = screen.get_size()
+        board_size = min(cur_w, cur_h) - margin * 2
+        board_size = max(board_size, squares * 30)  # minimum reasonable size
+        sq_ = board_size // squares
+        board_size = sq_ * squares
+        left_ = (cur_w - board_size) // 2
+        top_ = (cur_h - board_size) // 2
+        return sq_, board_size, left_, top_
+    sq, board_size, left, top = compute_layout()
 
     GREEN = (118, 150, 86)
     WHITE = (255, 255, 255)
@@ -95,6 +100,14 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
         "white": (row_1, col_e),
         "black": (row_9, col_e),
     }
+
+    # Walls (each player up to 9). We'll implement simple Quoridor-like walls.
+    horizontal_walls: set[Tuple[int, int]] = set()  # anchors for horizontal walls
+    vertical_walls: set[Tuple[int, int]] = set()    # anchors for vertical walls
+    max_walls_per_player = 9
+    walls_remaining = {"white": max_walls_per_player, "black": max_walls_per_player}
+    placing_wall = False
+    wall_preview: Optional[Tuple[str, int, int]] = None  # (orientation, r, c)
 
     # Turn management: white starts
     turn: str = "white"
@@ -131,9 +144,95 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
     # Networking: listener for opponent moves
     state_lock = threading.Lock()
     pending_moves: List[Dict[str, Any]] = []
+    opponent_left = threading.Event()
 
     # Visual feedback: remember last move (color, to_rc) with a fade timer
     last_move: Optional[Tuple[str, Tuple[int, int], int]] = None  # (color, to, timestamp_ms)
+
+    # Rematch coordination flags
+    rematch_local_request = False
+    rematch_remote_request = False
+
+    # Win state
+    game_over = False
+    winner_color: Optional[str] = None
+    winner_name: Optional[str] = None
+    win_announced = False
+    # Scores (persist for lifetime of this board session across rematches)
+    white_score = 0
+    black_score = 0
+    score_updated_for_game = False
+
+    def check_and_set_victory(trigger_color: Optional[str] = None, announce: bool = True):
+        """Check victory conditions after a move and announce if needed.
+        White wins if reaches row 0; Black wins if reaches last row (squares-1)."""
+        nonlocal game_over, winner_color, winner_name, win_announced, white_score, black_score, score_updated_for_game
+        if game_over:
+            return
+        # White victory
+        if positions["white"][0] == 0:
+            game_over = True
+            winner_color = "white"
+        # Black victory
+        elif positions["black"][0] == squares - 1:
+            game_over = True
+            winner_color = "black"
+        if game_over:
+            # Increment score exactly once
+            if not score_updated_for_game and winner_color in ("white", "black"):
+                if winner_color == "white":
+                    white_score += 1
+                else:
+                    black_score += 1
+                score_updated_for_game = True
+            # Assign winner name: if local knows player's own color
+            if your_color == winner_color:
+                # local player won
+                # Extract own displayed name (before ' vs ' if combined)
+                if " vs " in name_value:
+                    winner = name_value.split(" vs ", 1)[0] if your_color in ("white", "black") else name_value
+                else:
+                    winner = name_value
+                winner_name = winner
+            else:
+                # Opponent possibly won; try parse name_value 'player vs opponent'
+                if " vs " in name_value:
+                    parts = name_value.split(" vs ", 1)
+                    if your_color in ("white", "black"):
+                        # your opponent name is after vs
+                        winner_name = parts[1]
+                    else:
+                        winner_name = parts[0]
+                else:
+                    winner_name = "Opponent"
+            # Announce to peer if we originated the move or explicitly triggered
+            if announce and sock and not win_announced:
+                try:
+                    msg = {"type": "win", "winner_color": winner_color, "winner_name": winner_name}
+                    sock.sendall(json.dumps(msg).encode("utf-8") + b"\n")
+                    win_announced = True
+                except Exception:
+                    pass
+
+    def reset_game_state():
+        nonlocal positions, turn, last_move, dragging, drag_color, rematch_local_request, rematch_remote_request, game_over, winner_color, winner_name, win_announced, score_updated_for_game, horizontal_walls, vertical_walls, walls_remaining, placing_wall, wall_preview
+        positions = {"white": (row_1, col_e), "black": (row_9, col_e)}
+        turn = "white"
+        last_move = None
+        dragging = False
+        drag_color = None
+        rematch_local_request = False
+        rematch_remote_request = False
+        game_over = False
+        winner_color = None
+        winner_name = None
+        win_announced = False
+        score_updated_for_game = False
+        horizontal_walls.clear()
+        vertical_walls.clear()
+        walls_remaining = {"white": max_walls_per_player, "black": max_walls_per_player}
+        placing_wall = False
+        wall_preview = None
 
     def legal_moves(r: int, c: int) -> List[Tuple[int, int]]:
         # Cardinal step moves
@@ -142,7 +241,27 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
         in_bounds_steps = [(rr, cc) for rr, cc in step_candidates if 0 <= rr < squares and 0 <= cc < squares]
 
         occ = {positions["white"], positions["black"]}
-        moves: List[Tuple[int, int]] = [(rr, cc) for rr, cc in in_bounds_steps if (rr, cc) not in occ]
+        # Wall blocking helper
+        def blocked(a: Tuple[int, int], b: Tuple[int, int]) -> bool:
+            ar, ac = a
+            br, bc = b
+            dr = br - ar
+            dc = bc - ac
+            # Vertical movement
+            if dc == 0 and abs(dr) == 1:
+                if dr == -1:  # up
+                    return (ar, ac) in horizontal_walls or (ar, ac-1) in horizontal_walls
+                else:  # down
+                    return (ar+1, ac) in horizontal_walls or (ar+1, ac-1) in horizontal_walls
+            # Horizontal movement
+            if dr == 0 and abs(dc) == 1:
+                if dc == -1:  # left
+                    return (ar, ac) in vertical_walls or (ar-1, ac) in vertical_walls
+                else:  # right
+                    return (ar, ac+1) in vertical_walls or (ar-1, ac+1) in vertical_walls
+            return False
+
+        moves: List[Tuple[int, int]] = [(rr, cc) for rr, cc in in_bounds_steps if (rr, cc) not in occ and not blocked((r, c), (rr, cc))]
 
         # Jump rule: if opponent pawn is exactly one step away in a cardinal direction,
         # you may jump over it to the next square if that landing square is in-bounds and empty.
@@ -163,7 +282,8 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
                 if adj == opponent_pos:
                     lr, lc = land
                     if 0 <= lr < squares and 0 <= lc < squares and land not in occ:
-                        moves.append(land)
+                        if not blocked((r, c), adj) and not blocked(adj, land):
+                            moves.append(land)
 
         # Remove duplicates while preserving order
         seen = set()
@@ -192,9 +312,74 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
         except Exception:
             pass
 
+    # --- Wall networking & validation helpers ---
+    def send_wall(orientation: str, r: int, c: int, color: str) -> None:
+        if not sock:
+            return
+        try:
+            msg = json.dumps({"type": "wall", "o": orientation, "r": r, "c": c, "color": color}).encode("utf-8") + b"\n"
+            sock.sendall(msg)
+            print(f"[client] sent wall: {color} {orientation} ({r},{c})")
+        except Exception:
+            pass
+
+    def can_place_wall(orientation: str, r: int, c: int) -> bool:
+        if orientation == 'h':
+            if not (1 <= r <= squares - 1 and 0 <= c <= squares - 2):
+                return False
+            if (r, c) in horizontal_walls:
+                return False
+            return True
+        if orientation == 'v':
+            if not (0 <= r <= squares - 2 and 1 <= c <= squares - 1):
+                return False
+            if (r, c) in vertical_walls:
+                return False
+            return True
+        return False
+
+    def place_wall(orientation: str, r: int, c: int, color: str, remote: bool = False) -> bool:
+        # Local placement requires available walls; remote placement trusts sender but caps at >=0
+        if not remote and walls_remaining[color] <= 0:
+            return False
+        if not can_place_wall(orientation, r, c):
+            return False
+        if orientation == 'h':
+            horizontal_walls.add((r, c))
+        else:
+            vertical_walls.add((r, c))
+        # Ensure both sides still can reach goals
+        def has_path(start: Tuple[int, int], target_rows: set[int]) -> bool:
+            from collections import deque
+            seen = {start}
+            dq = deque([start])
+            while dq:
+                cr, cc = dq.popleft()
+                if cr in target_rows:
+                    return True
+                for nr, nc in legal_moves(cr, cc):
+                    if (nr, nc) not in seen:
+                        seen.add((nr, nc))
+                        dq.append((nr, nc))
+            return False
+        white_ok = has_path(positions['white'], {0})
+        black_ok = has_path(positions['black'], {squares - 1})
+        if not (white_ok and black_ok):
+            if orientation == 'h':
+                horizontal_walls.discard((r, c))
+            else:
+                vertical_walls.discard((r, c))
+            return False
+        # Deduct count (also for remote so UI stays in sync)
+        if walls_remaining[color] > 0:
+            walls_remaining[color] -= 1
+        return True
+
     def listen_loop():
         if not sock:
             return
+        # Access outer state variables we mutate
+        nonlocal rematch_remote_request, rematch_local_request, game_over, winner_color, winner_name, win_announced, score_updated_for_game, turn, white_score, black_score
         sock.settimeout(0.5)
         buf: bytes = b""
         while True:
@@ -220,7 +405,58 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
                         if p_type == "move":
                             with state_lock:
                                 pending_moves.append(payload)
+                        elif p_type == "wall":
+                            o = str(payload.get("o") or "")
+                            r_any = payload.get("r")
+                            c_any = payload.get("c")
+                            w_color = str(payload.get("color") or "")
+                            if o in ("h", "v") and isinstance(r_any, int) and isinstance(c_any, int) and w_color in ("white", "black"):
+                                applied = place_wall(o, int(r_any), int(c_any), w_color, remote=True)
+                                if applied:
+                                    print(f"[client] remote wall {w_color} {o} ({r_any},{c_any})")
+                                    if turn == w_color:
+                                        turn = 'white' if w_color == 'black' else 'black'
+                        elif p_type == "rematch":
+                            print("[client] rematch request received")
+                            rematch_remote_request = True
+                            if rematch_local_request:
+                                # Both agreed; send start signal to ensure sync
+                                print("[client] both sides requested rematch -> sending rematch_start")
+                                try:
+                                    if sock:
+                                        sock.sendall(json.dumps({"type": "rematch_start"}).encode("utf-8") + b"\n")
+                                except Exception:
+                                    pass
+                                reset_game_state()
+                        elif p_type == "rematch_start":
+                            print("[client] rematch_start received -> resetting game state")
+                            reset_game_state()
+                            turn = "white"
+                        elif p_type == "win":
+                            # Opponent announced a win
+                            winner_color_msg = payload.get("winner_color")
+                            name_msg = payload.get("winner_name")
+                            if isinstance(winner_color_msg, str):
+                                winner_color_local = winner_color_msg
+                            else:
+                                winner_color_local = None
+                            if isinstance(name_msg, str):
+                                winner_name_local = name_msg
+                            else:
+                                winner_name_local = "Opponent"
+                            if not game_over:
+                                game_over = True
+                                winner_color = winner_color_local
+                                winner_name = winner_name_local
+                                win_announced = True
+                                if not score_updated_for_game and winner_color in ("white", "black"):
+                                    if winner_color == "white":
+                                        white_score += 1
+                                    else:
+                                        black_score += 1
+                                    score_updated_for_game = True
                         elif p_type == "end":
+                            opponent_left.set()
                             return
             except socket.timeout:
                 continue
@@ -234,6 +470,8 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
 
     running_board = True
     while running_board:
+        # Recompute layout in case of window resize
+        sq, board_size, left, top = compute_layout()
         # First, apply any pending opponent moves so the UI reflects the latest state
         if sock is not None:
             with state_lock:
@@ -254,8 +492,12 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
                             # Record last move and log for clarity
                             last_move = (color, tr, pygame.time.get_ticks())
                             print(f"[client] received move: {color} -> {tr}")
-                            # Toggle turn after any valid move
-                            turn = "black" if color == "white" else "white"
+                            # Check if that move produced a victory (without re-announcing)
+                            pre_go = game_over
+                            check_and_set_victory(trigger_color=color, announce=False)
+                            if not game_over:
+                                # Toggle turn only if game not ended
+                                turn = "black" if color == "white" else "white"
                         except Exception:
                             pass
 
@@ -265,10 +507,82 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
                 sys.exit()
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
-                    running_board = False
+                    if game_over and not opponent_left.is_set():
+                        # Treat ESC during game over as rematch request
+                        if not rematch_local_request:
+                            rematch_local_request = True
+                            if sock:
+                                try:
+                                    sock.sendall(json.dumps({"type": "rematch"}).encode("utf-8") + b"\n")
+                                except Exception:
+                                    pass
+                            if rematch_remote_request:
+                                if sock:
+                                    try:
+                                        sock.sendall(json.dumps({"type": "rematch_start"}).encode("utf-8") + b"\n")
+                                    except Exception:
+                                        pass
+                                reset_game_state()
+                    else:
+                        # Exit to entry screen
+                        running_board = False
+                if event.key == pygame.K_w and not game_over and (your_color == turn) and walls_remaining.get(your_color,0) > 0:
+                    # Toggle wall placement mode
+                    placing_wall = not placing_wall
+                    wall_preview = None
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if opponent_left.is_set():
+                    # Ignore further interaction after opponent leaves
+                    continue
+                # Rematch button geometry (always active unless opponent left)
+                cur_w, cur_h = screen.get_size()
+                btn_w, btn_h = 140, 40
+                btn_margin = 10
+                rematch_rect = pygame.Rect(cur_w - btn_w - btn_margin, btn_margin, btn_w, btn_h)
+                if rematch_rect.collidepoint(event.pos):
+                    if not rematch_local_request:
+                        rematch_local_request = True
+                        if sock:
+                            try:
+                                sock.sendall(json.dumps({"type": "rematch"}).encode("utf-8") + b"\n")
+                            except Exception:
+                                pass
+                    if rematch_remote_request:
+                        if sock:
+                            try:
+                                sock.sendall(json.dumps({"type": "rematch_start"}).encode("utf-8") + b"\n")
+                            except Exception:
+                                pass
+                        reset_game_state()
+                    continue  # handled click
+                if game_over:
+                    # Treat board click as implicit rematch request
+                    if not rematch_local_request:
+                        rematch_local_request = True
+                        if sock:
+                            try:
+                                sock.sendall(json.dumps({"type": "rematch"}).encode("utf-8") + b"\n")
+                            except Exception:
+                                pass
+                    if rematch_remote_request:
+                        if sock:
+                            try:
+                                sock.sendall(json.dumps({"type": "rematch_start"}).encode("utf-8") + b"\n")
+                            except Exception:
+                                pass
+                        reset_game_state()
+                    continue  # don't allow moving during game over
                 mx, my = event.pos
-                # Determine clicked logical square
+                # If placing wall, commit placement based on preview
+                if placing_wall and not game_over and (your_color == turn):
+                    if wall_preview is not None:
+                        o, wr, wc = wall_preview
+                        if place_wall(o, wr, wc, your_color):
+                            send_wall(o, wr, wc, your_color)
+                            turn = 'black' if turn == 'white' else 'white'
+                    placing_wall = False
+                    wall_preview = None
+                    continue
                 maybe_rc = mouse_to_logical(mx, my)
                 if maybe_rc is not None:
                     lr, lc = maybe_rc
@@ -280,43 +594,79 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
                     ):
                         dragging = True
                         drag_color = clicked_color
-                        # drag offset to keep image centered under cursor (use display coords)
                         d_r, d_c = to_display_rc(lr, lc)
                         center_x = left + d_c * sq + sq // 2
                         center_y = top + d_r * sq + sq // 2
                         drag_offset = (mx - center_x, my - center_y)
                         drag_pos_px = (mx, my)
-            if event.type == pygame.MOUSEMOTION and dragging:
-                drag_pos_px = event.pos
-            if event.type == pygame.MOUSEBUTTONUP and event.button == 1 and dragging:
+            if event.type == pygame.MOUSEMOTION:
                 mx, my = event.pos
-                dest = mouse_to_logical(mx, my)
-                yours = drag_color or (your_color or "white")
-                from_rc = positions[yours]
-                lm = legal_moves(*from_rc)
-                if dest is not None:
-                    row, col = dest
-                    if (row, col) in lm:
-                        positions[yours] = (row, col)
-                        send_move(from_rc, (row, col), yours)
-                        last_move = (yours, (row, col), pygame.time.get_ticks())
-                        # Switch turn after a successful move
-                        turn = "black" if yours == "white" else "white"
-                # end drag in any case
-                dragging = False
-                drag_color = None
+                if placing_wall:
+                    mods = pygame.key.get_mods()
+                    orientation = 'h'
+                    if mods & pygame.KMOD_SHIFT:
+                        orientation = 'v'
+                    dc = (mx - left) // sq
+                    dr = (my - top) // sq
+                    if 0 <= dr < squares and 0 <= dc < squares:
+                        if can_place_wall(orientation, int(dr), int(dc)):
+                            wall_preview = (orientation, int(dr), int(dc))
+                        else:
+                            wall_preview = None
+                    else:
+                        wall_preview = None
+                if dragging and not opponent_left.is_set():
+                    drag_pos_px = event.pos
+            if event.type == pygame.MOUSEBUTTONUP and event.button == 1 and dragging:
+                if opponent_left.is_set():
+                    dragging = False
+                    drag_color = None
+                else:
+                    mx, my = event.pos
+                    dest = mouse_to_logical(mx, my)
+                    yours = drag_color or (your_color or "white")
+                    from_rc = positions[yours]
+                    lm = legal_moves(*from_rc)
+                    if dest is not None:
+                        row, col = dest
+                        if (row, col) in lm:
+                            positions[yours] = (row, col)
+                            send_move(from_rc, (row, col), yours)
+                            last_move = (yours, (row, col), pygame.time.get_ticks())
+                            turn = "black" if yours == "white" else "white"
+                            check_and_set_victory(trigger_color=yours, announce=True)
+                    dragging = False
+                    drag_color = None
 
         screen.fill(BG)
 
-        # Optional: show the entered name at the top if provided
+        # Optional: show the entered name at the top if provided plus score (top-left)
+        cur_w, _cur_h = screen.get_size()
         if name_value:
             label = str(name_value)
             if your_color:
                 label += f" ({your_color})"
-            # Show current turn
             label += f"  •  Turn: {turn.title()}"
             name_surf = BIG.render(label, True, TEXT)
-            screen.blit(name_surf, (WIDTH // 2 - name_surf.get_width() // 2, top - 30))
+            label_y = max(5, top - 40)
+            screen.blit(name_surf, (cur_w // 2 - name_surf.get_width() // 2, label_y))
+        # Bottom-left anchored scoreboard & walls info
+        score_text = f"White {white_score} - {black_score} Black"
+        walls_text = f"Walls W:{walls_remaining['white']} B:{walls_remaining['black']}  (W=wall, Shift=vertical)"
+        score_surf = FONT.render(score_text, True, LABEL)
+        walls_surf = FONT.render(walls_text, True, LABEL)
+        bl_margin = 12
+        cur_w, cur_h = screen.get_size()
+        walls_y = cur_h - bl_margin - walls_surf.get_height()
+        score_y = walls_y - 4 - score_surf.get_height()
+        hud_x = bl_margin
+        bg_w = max(score_surf.get_width(), walls_surf.get_width()) + 14
+        bg_h = (walls_y + walls_surf.get_height()) - score_y + 10
+        backdrop = pygame.Surface((bg_w, bg_h), pygame.SRCALPHA)
+        backdrop.fill((255, 255, 255, 170))
+        screen.blit(backdrop, (hud_x - 7, score_y - 5))
+        screen.blit(score_surf, (hud_x, score_y))
+        screen.blit(walls_surf, (hud_x, walls_y))
 
         # Draw the board
         for r in range(squares):
@@ -324,6 +674,34 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
                 color = WHITE if (r + c) % 2 == 0 else GREEN
                 rect = pygame.Rect(left + c * sq, top + r * sq, sq, sq)
                 pygame.draw.rect(screen, color, rect)
+
+        # Draw placed walls
+        wall_color = (90, 60, 25)
+        for (wr, wc) in horizontal_walls:
+            dr1, dc1 = to_display_rc(wr-1, wc)
+            x = left + dc1 * sq
+            y = top + dr1 * sq - 4
+            pygame.draw.rect(screen, wall_color, pygame.Rect(x, y, sq * 2, 8), border_radius=2)
+        for (wr, wc) in vertical_walls:
+            dr1, dc1 = to_display_rc(wr, wc-1)
+            x = left + dc1 * sq - 4
+            y = top + dr1 * sq
+            pygame.draw.rect(screen, wall_color, pygame.Rect(x, y, 8, sq * 2), border_radius=2)
+
+        # Wall preview
+        if placing_wall and wall_preview is not None:
+            o, wr, wc = wall_preview
+            preview_color = (200, 140, 60)
+            if o == 'h':
+                dr1, dc1 = to_display_rc(wr-1, wc)
+                x = left + dc1 * sq
+                y = top + dr1 * sq - 4
+                pygame.draw.rect(screen, preview_color, pygame.Rect(x, y, sq * 2, 8), border_radius=2)
+            else:
+                dr1, dc1 = to_display_rc(wr, wc-1)
+                x = left + dc1 * sq - 4
+                y = top + dr1 * sq
+                pygame.draw.rect(screen, preview_color, pygame.Rect(x, y, 8, sq * 2), border_radius=2)
 
         # If dragging, show legal moves for selected piece
         if dragging and drag_color:
@@ -379,16 +757,91 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
 
         # Helper text
         # Turn status message (UX hint)
-        if your_color:
-            turn_msg = "Your move" if turn == your_color else "Opponent's move"
+        if game_over:
+            if winner_color in ("white", "black") and your_color in ("white", "black"):
+                if winner_color == your_color:
+                    turn_msg = "You win!"
+                else:
+                    turn_msg = "You lost!"
+            else:
+                if winner_name:
+                    turn_msg = f"{winner_name} wins!"
+                elif winner_color:
+                    turn_msg = f"{winner_color.title()} wins!"
+                else:
+                    turn_msg = "Game over"
         else:
-            # local/offline: show whose move
-            turn_msg = f"{turn.title()}'s move"
+            if your_color:
+                turn_msg = "Your move" if turn == your_color else "Opponent's move"
+            else:
+                # local/offline: show whose move
+                turn_msg = f"{turn.title()}'s move"
+        # Footer layout (turn + helper/disconnect) stacked without overlap
+        cur_w, cur_h = screen.get_size()
         turn_surf = FONT.render(turn_msg, True, LABEL)
-        screen.blit(turn_surf, (WIDTH // 2 - turn_surf.get_width() // 2, top + board_size + 10))
 
-        # Helper text below
-        screen.blit(title_text, (WIDTH // 2 - title_text.get_width() // 2, top + board_size + 32))
+        if opponent_left.is_set():
+            second_surf = BIG.render("Opponent disconnected. Press ESC.", True, (200, 60, 60))
+        elif game_over:
+            if rematch_local_request and rematch_remote_request:
+                second_line = "Restarting"
+            elif rematch_local_request:
+                second_line = "Waiting for opponent..."
+            elif rematch_remote_request:
+                second_line = "Opponent wants rematch"
+            else:
+                second_line = "Press ESC or click Rematch"
+            second_surf = FONT.render(second_line, True, LABEL)
+        else:
+            second_surf = title_text  # reuse existing surface (Press ESC to return)
+
+        spacing = 4
+        base_y = top + board_size + 10
+        needed = turn_surf.get_height() + spacing + second_surf.get_height()
+        bottom_limit = cur_h - 5
+
+        if base_y + needed <= bottom_limit:
+            turn_y = base_y
+            second_y = turn_y + turn_surf.get_height() + spacing
+        else:
+            # Try anchoring at bottom
+            second_y = bottom_limit - second_surf.get_height()
+            turn_y = second_y - spacing - turn_surf.get_height()
+            if turn_y < base_y:
+                # Not enough space: shift both up as a block but keep order
+                turn_y = max(5, bottom_limit - needed)
+                second_y = turn_y + turn_surf.get_height() + spacing
+
+        screen.blit(turn_surf, (cur_w // 2 - turn_surf.get_width() // 2, turn_y))
+        screen.blit(second_surf, (cur_w // 2 - second_surf.get_width() // 2, second_y))
+
+        # Rematch button (top-right) - always visible unless opponent left
+        btn_w, btn_h = 140, 40
+        btn_margin = 10
+        rematch_rect = pygame.Rect(cur_w - btn_w - btn_margin, btn_margin, btn_w, btn_h)
+        if opponent_left.is_set():
+            rematch_label = "(N/A)"
+            btn_color = (160, 160, 160)
+        else:
+            if rematch_local_request and rematch_remote_request:
+                rematch_label = "Restarting"
+                btn_color = (90, 170, 90)
+            elif rematch_local_request:
+                rematch_label = "Waiting..."
+                btn_color = (180, 150, 70)
+            elif rematch_remote_request:
+                rematch_label = "Accept"
+                btn_color = (70, 130, 200)
+            else:
+                rematch_label = "Rematch"
+                btn_color = (70, 130, 180)
+        pygame.draw.rect(screen, btn_color, rematch_rect, border_radius=8)
+        pygame.draw.rect(screen, (40, 40, 40), rematch_rect, width=2, border_radius=8)
+        r_txt = FONT.render(rematch_label, True, (255, 255, 255))
+        screen.blit(r_txt, (rematch_rect.centerx - r_txt.get_width() // 2, rematch_rect.centery - r_txt.get_height() // 2))
+
+        # Helper text / opponent status
+    # (Old footer drawing replaced by stacked logic above)
 
         pygame.display.flip()
         clock.tick(60)
@@ -554,6 +1007,16 @@ while True:
         if event.type == pygame.QUIT:
             pygame.quit()
             sys.exit()
+        if event.type == pygame.VIDEORESIZE:
+            # Update global width/height and recreate display surface
+            WIDTH, HEIGHT = event.w, event.h
+            screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.RESIZABLE)
+            # Recenter UI elements
+            label_pos[0] = WIDTH // 2 - label_surf.get_width() // 2
+            input_rect.centerx = WIDTH // 2
+            input_rect.top = label_pos[1] + label_surf.get_height() + 12
+            button_rect.centerx = WIDTH // 2
+            button_rect.top = input_rect.bottom + 12
 
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             if input_rect.collidepoint(event.pos):
@@ -582,7 +1045,7 @@ while True:
         pygame.display.set_caption("Name Entry")
 
     # Label
-    screen.blit(label_surf, label_pos)
+    screen.blit(label_surf, tuple(label_pos))
 
     # Input box
     pygame.draw.rect(screen, INPUT_BG, input_rect, border_radius=6)
