@@ -127,6 +127,20 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
             return dr, dc
         return (squares - 1 - dr, squares - 1 - dc)
 
+    # Anchor helpers (anchors live on (squares-1) x (squares-1) grid)
+    def anchor_to_display_rc(r: int, c: int) -> Tuple[int, int]:
+        """Convert logical anchor (r,c) to display anchor.
+        Anchor grid is (squares-1) x (squares-1). For flipped view we 180-rotate anchors
+        without extra offsets so (0,0)->(s-2,s-2)."""
+        if not flip_view:
+            return r, c
+        return ( (squares - 2) - r, (squares - 2) - c )
+
+    def anchor_from_display_rc(dr: int, dc: int) -> Tuple[int, int]:
+        if not flip_view:
+            return dr, dc
+        return ( (squares - 2) - dr, (squares - 2) - dc )
+
     def mouse_to_logical(mx: int, my: int) -> Optional[Tuple[int, int]]:
         dc = (mx - left) // sq
         dr = (my - top) // sq
@@ -208,7 +222,7 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
             # Announce to peer if we originated the move or explicitly triggered
             if announce and sock and not win_announced:
                 try:
-                    msg = {"type": "win", "winner_color": winner_color, "winner_name": winner_name}
+                    msg = {"type": "win", "winner_color": winner_color, "winner_name": winner_name} # type: ignore
                     sock.sendall(json.dumps(msg).encode("utf-8") + b"\n")
                     win_announced = True
                 except Exception:
@@ -247,18 +261,21 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
             br, bc = b
             dr = br - ar
             dc = bc - ac
-            # Vertical movement
+            # Normalized anchors:
+            #  - horizontal wall anchor (r,c) blocks movement between rows r and r+1 spanning columns c and c+1
+            #  - vertical wall anchor   (r,c) blocks movement between cols c and c+1 spanning rows r and r+1
+            # Vertical pawn movement
             if dc == 0 and abs(dr) == 1:
-                if dr == -1:  # up
+                if dr == -1:  # moving up from (ar,ac) to (ar-1,ac)
+                    return (ar-1, ac) in horizontal_walls or (ar-1, ac-1) in horizontal_walls
+                else:  # moving down from (ar,ac) to (ar+1,ac)
                     return (ar, ac) in horizontal_walls or (ar, ac-1) in horizontal_walls
-                else:  # down
-                    return (ar+1, ac) in horizontal_walls or (ar+1, ac-1) in horizontal_walls
-            # Horizontal movement
+            # Horizontal pawn movement
             if dr == 0 and abs(dc) == 1:
-                if dc == -1:  # left
+                if dc == -1:  # moving left
+                    return (ar, ac-1) in vertical_walls or (ar-1, ac-1) in vertical_walls
+                else:  # moving right
                     return (ar, ac) in vertical_walls or (ar-1, ac) in vertical_walls
-                else:  # right
-                    return (ar, ac+1) in vertical_walls or (ar-1, ac+1) in vertical_walls
             return False
 
         moves: List[Tuple[int, int]] = [(rr, cc) for rr, cc in in_bounds_steps if (rr, cc) not in occ and not blocked((r, c), (rr, cc))]
@@ -286,11 +303,11 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
                             moves.append(land)
 
         # Remove duplicates while preserving order
-        seen = set()
+        seen = set() # type: ignore
         uniq_moves: List[Tuple[int, int]] = []
         for m in moves:
             if m not in seen:
-                seen.add(m)
+                seen.add(m) # type: ignore
                 uniq_moves.append(m)
         return uniq_moves
 
@@ -324,16 +341,18 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
             pass
 
     def can_place_wall(orientation: str, r: int, c: int) -> bool:
+        # Normalized anchors (Option 1): both orientations use 0 <= r,c <= squares-2
         if orientation == 'h':
-            if not (1 <= r <= squares - 1 and 0 <= c <= squares - 2):
+            if not (0 <= r <= squares - 2 and 0 <= c <= squares - 2):
                 return False
-            if (r, c) in horizontal_walls:
+            # Disallow if same horizontal already or a vertical already occupies that anchor (no crossing/overlap)
+            if (r, c) in horizontal_walls or (r, c) in vertical_walls:
                 return False
             return True
         if orientation == 'v':
-            if not (0 <= r <= squares - 2 and 1 <= c <= squares - 1):
+            if not (0 <= r <= squares - 2 and 0 <= c <= squares - 2):
                 return False
-            if (r, c) in vertical_walls:
+            if (r, c) in vertical_walls or (r, c) in horizontal_walls:
                 return False
             return True
         return False
@@ -348,6 +367,12 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
             horizontal_walls.add((r, c))
         else:
             vertical_walls.add((r, c))
+        # Debug placement mapping
+        try:
+            drw, dcw = anchor_to_display_rc(r, c)
+            print(f"[debug wall] placed {orientation} anchor=({r},{c}) color={color} flip={flip_view} -> display_anchor=({drw},{dcw})")
+        except Exception:
+            pass
         # Ensure both sides still can reach goals
         def has_path(start: Tuple[int, int], target_rows: set[int]) -> bool:
             from collections import deque
@@ -493,7 +518,7 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
                             last_move = (color, tr, pygame.time.get_ticks())
                             print(f"[client] received move: {color} -> {tr}")
                             # Check if that move produced a victory (without re-announcing)
-                            pre_go = game_over
+                            pre_go = game_over # type: ignore
                             check_and_set_victory(trigger_color=color, announce=False)
                             if not game_over:
                                 # Toggle turn only if game not ended
@@ -526,7 +551,7 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
                     else:
                         # Exit to entry screen
                         running_board = False
-                if event.key == pygame.K_w and not game_over and (your_color == turn) and walls_remaining.get(your_color,0) > 0:
+                if event.key == pygame.K_w and not game_over and (your_color == turn) and walls_remaining.get(your_color,0) > 0: # type: ignore
                     # Toggle wall placement mode
                     placing_wall = not placing_wall
                     wall_preview = None
@@ -577,8 +602,9 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
                 if placing_wall and not game_over and (your_color == turn):
                     if wall_preview is not None:
                         o, wr, wc = wall_preview
-                        if place_wall(o, wr, wc, your_color):
-                            send_wall(o, wr, wc, your_color)
+                        # wr,wc already normalized anchor (0..squares-2)
+                        if place_wall(o, wr, wc, your_color): # type: ignore
+                            send_wall(o, wr, wc, your_color) # type: ignore
                             turn = 'black' if turn == 'white' else 'white'
                     placing_wall = False
                     wall_preview = None
@@ -608,9 +634,15 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
                         orientation = 'v'
                     dc = (mx - left) // sq
                     dr = (my - top) // sq
-                    if 0 <= dr < squares and 0 <= dc < squares:
-                        if can_place_wall(orientation, int(dr), int(dc)):
-                            wall_preview = (orientation, int(dr), int(dc))
+                    # For flipped view we render walls at display_row = anchor_row + 2
+                    # so invert that when mapping cursor -> anchor (shift up by 2)
+                    adj_dr = dr
+                    if flip_view:
+                        adj_dr = dr - 1
+                    if 0 <= adj_dr < squares-1 and 0 <= dc < squares-1:
+                        lr, lc = anchor_from_display_rc(int(adj_dr), int(dc))
+                        if can_place_wall(orientation, lr, lc):
+                            wall_preview = (orientation, lr, lc)
                         else:
                             wall_preview = None
                     else:
@@ -678,12 +710,12 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
         # Draw placed walls
         wall_color = (90, 60, 25)
         for (wr, wc) in horizontal_walls:
-            dr1, dc1 = to_display_rc(wr-1, wc)
+            dr1, dc1 = anchor_to_display_rc(wr, wc)
             x = left + dc1 * sq
             y = top + dr1 * sq - 4
             pygame.draw.rect(screen, wall_color, pygame.Rect(x, y, sq * 2, 8), border_radius=2)
         for (wr, wc) in vertical_walls:
-            dr1, dc1 = to_display_rc(wr, wc-1)
+            dr1, dc1 = anchor_to_display_rc(wr, wc)
             x = left + dc1 * sq - 4
             y = top + dr1 * sq
             pygame.draw.rect(screen, wall_color, pygame.Rect(x, y, 8, sq * 2), border_radius=2)
@@ -692,13 +724,12 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
         if placing_wall and wall_preview is not None:
             o, wr, wc = wall_preview
             preview_color = (200, 140, 60)
+            dr1, dc1 = anchor_to_display_rc(wr, wc)
             if o == 'h':
-                dr1, dc1 = to_display_rc(wr-1, wc)
                 x = left + dc1 * sq
                 y = top + dr1 * sq - 4
                 pygame.draw.rect(screen, preview_color, pygame.Rect(x, y, sq * 2, 8), border_radius=2)
             else:
-                dr1, dc1 = to_display_rc(wr, wc-1)
                 x = left + dc1 * sq - 4
                 y = top + dr1 * sq
                 pygame.draw.rect(screen, preview_color, pygame.Rect(x, y, 8, sq * 2), border_radius=2)
@@ -729,7 +760,7 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
         # Last move highlight (2 seconds)
         now_ms = pygame.time.get_ticks()
         if last_move is not None:
-            mv_color, mv_to, ts = last_move
+            mv_color, mv_to, ts = last_move # type: ignore
             if now_ms - ts <= 2000:
                 lr, lc = mv_to
                 d_r, d_c = to_display_rc(lr, lc)
@@ -758,7 +789,7 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
         # Helper text
         # Turn status message (UX hint)
         if game_over:
-            if winner_color in ("white", "black") and your_color in ("white", "black"):
+            if winner_color in ("white", "black") and your_color in ("white", "black"): # type: ignore
                 if winner_color == your_color:
                     turn_msg = "You win!"
                 else:
@@ -1009,7 +1040,7 @@ while True:
             sys.exit()
         if event.type == pygame.VIDEORESIZE:
             # Update global width/height and recreate display surface
-            WIDTH, HEIGHT = event.w, event.h
+            WIDTH, HEIGHT = event.w, event.h # type: ignore
             screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.RESIZABLE)
             # Recenter UI elements
             label_pos[0] = WIDTH // 2 - label_surf.get_width() // 2
