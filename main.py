@@ -262,20 +262,20 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
             dr = br - ar
             dc = bc - ac
             # Normalized anchors:
-            #  - horizontal wall anchor (r,c) blocks movement between rows r and r+1 spanning columns c and c+1
-            #  - vertical wall anchor   (r,c) blocks movement between cols c and c+1 spanning rows r and r+1
+            #  - horizontal wall at anchor (r,c) sits on the edge between rows r and r+1, spanning columns c..c+1
+            #  - vertical wall   at anchor (r,c) sits on the edge between cols c and c+1, spanning rows r..r+1
             # Vertical pawn movement
             if dc == 0 and abs(dr) == 1:
-                if dr == -1:  # moving up from (ar,ac) to (ar-1,ac)
-                    return (ar-1, ac) in horizontal_walls or (ar-1, ac-1) in horizontal_walls
-                else:  # moving down from (ar,ac) to (ar+1,ac)
-                    return (ar, ac) in horizontal_walls or (ar, ac-1) in horizontal_walls
+                if dr == -1:  # moving up: crossing edge between rows ar-1 and ar at column band ac-1..ac
+                    return (ar-1, ac if ac < squares-1 else ac-1) in horizontal_walls or (ar-1, ac-1) in horizontal_walls
+                else:  # moving down: crossing edge between rows ar and ar+1 at column band ac-1..ac
+                    return (ar, ac if ac < squares-1 else ac-1) in horizontal_walls or (ar, ac-1) in horizontal_walls
             # Horizontal pawn movement
             if dr == 0 and abs(dc) == 1:
-                if dc == -1:  # moving left
-                    return (ar, ac-1) in vertical_walls or (ar-1, ac-1) in vertical_walls
-                else:  # moving right
-                    return (ar, ac) in vertical_walls or (ar-1, ac) in vertical_walls
+                if dc == -1:  # moving left: crossing edge between cols ac-1 and ac at row band ar-1..ar
+                    return (ar if ar < squares-1 else ar-1, ac-1) in vertical_walls or (ar-1, ac-1) in vertical_walls
+                else:  # moving right: crossing edge between cols ac and ac+1 at row band ar-1..ar
+                    return (ar if ar < squares-1 else ar-1, ac) in vertical_walls or (ar-1, ac) in vertical_walls
             return False
 
         moves: List[Tuple[int, int]] = [(rr, cc) for rr, cc in in_bounds_steps if (rr, cc) not in occ and not blocked((r, c), (rr, cc))]
@@ -349,23 +349,53 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
             if (r, c) in horizontal_walls or (r, c) in vertical_walls:
                 return False
             return True
-        if orientation == 'v':
+        elif orientation == 'v':
             if not (0 <= r <= squares - 2 and 0 <= c <= squares - 2):
                 return False
             if (r, c) in vertical_walls or (r, c) in horizontal_walls:
                 return False
             return True
-        return False
+        else:
+            return False
 
     def place_wall(orientation: str, r: int, c: int, color: str, remote: bool = False) -> bool:
-        # Local placement requires available walls; remote placement trusts sender but caps at >=0
-        if not remote and walls_remaining[color] <= 0:
+        # Remote placements: trust sender (bounds-check only) to avoid desync
+        if remote:
+            if orientation not in ("h", "v"):
+                return False
+            if not (0 <= r <= squares - 2 and 0 <= c <= squares - 2):
+                return False
+            # Only apply if not already present to avoid double toggles and double decrements
+            if orientation == 'h':
+                if (r, c) in horizontal_walls:
+                    return False
+                horizontal_walls.add((r, c))
+            else:
+                if (r, c) in vertical_walls:
+                    return False
+                vertical_walls.add((r, c))
+            try:
+                drw, dcw = anchor_to_display_rc(r, c)
+                print(f"[client] remote wall applied {color} {orientation} ({r},{c}) -> display=({drw},{dcw})")
+            except Exception:
+                pass
+            if walls_remaining[color] > 0:
+                walls_remaining[color] -= 1
+            return True
+
+        # Local placement requires available walls and must satisfy local rules
+        if walls_remaining[color] <= 0:
             return False
         if not can_place_wall(orientation, r, c):
             return False
+        # Avoid duplicate adds as an extra safety guard
         if orientation == 'h':
+            if (r, c) in horizontal_walls:
+                return False
             horizontal_walls.add((r, c))
         else:
+            if (r, c) in vertical_walls:
+                return False
             vertical_walls.add((r, c))
         # Debug placement mapping
         try:
@@ -373,28 +403,30 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
             print(f"[debug wall] placed {orientation} anchor=({r},{c}) color={color} flip={flip_view} -> display_anchor=({drw},{dcw})")
         except Exception:
             pass
-        # Ensure both sides still can reach goals
-        def has_path(start: Tuple[int, int], target_rows: set[int]) -> bool:
-            from collections import deque
-            seen = {start}
-            dq = deque([start])
-            while dq:
-                cr, cc = dq.popleft()
-                if cr in target_rows:
-                    return True
-                for nr, nc in legal_moves(cr, cc):
-                    if (nr, nc) not in seen:
-                        seen.add((nr, nc))
-                        dq.append((nr, nc))
-            return False
-        white_ok = has_path(positions['white'], {0})
-        black_ok = has_path(positions['black'], {squares - 1})
-        if not (white_ok and black_ok):
-            if orientation == 'h':
-                horizontal_walls.discard((r, c))
-            else:
-                vertical_walls.discard((r, c))
-            return False
+        # Local: ensure both sides still can reach goals
+        if not remote:
+            # Ensure both sides still can reach goals
+            def has_path(start: Tuple[int, int], target_rows: set[int]) -> bool:
+                from collections import deque
+                seen = {start}
+                dq = deque([start])
+                while dq:
+                    cr, cc = dq.popleft()
+                    if cr in target_rows:
+                        return True
+                    for nr, nc in legal_moves(cr, cc):
+                        if (nr, nc) not in seen:
+                            seen.add((nr, nc))
+                            dq.append((nr, nc))
+                return False
+            white_ok = has_path(positions['white'], {0})
+            black_ok = has_path(positions['black'], {squares - 1})
+            if not (white_ok and black_ok):
+                if orientation == 'h':
+                    horizontal_walls.discard((r, c))
+                else:
+                    vertical_walls.discard((r, c))
+                return False
         # Deduct count (also for remote so UI stays in sync)
         if walls_remaining[color] > 0:
             walls_remaining[color] -= 1
@@ -707,11 +739,13 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
         for (wr, wc) in horizontal_walls:
             dr1, dc1 = anchor_to_display_rc(wr, wc)
             x = left + dc1 * sq
-            y = top + dr1 * sq - 4
+            # Horizontal wall lies between rows r and r+1 -> y at (r+1)*sq
+            y = top + (dr1 + 1) * sq - 4
             pygame.draw.rect(screen, wall_color, pygame.Rect(x, y, sq * 2, 8), border_radius=2)
         for (wr, wc) in vertical_walls:
             dr1, dc1 = anchor_to_display_rc(wr, wc)
-            x = left + dc1 * sq - 4
+            # Vertical wall lies between cols c and c+1 -> x at (c+1)*sq
+            x = left + (dc1 + 1) * sq - 4
             y = top + dr1 * sq
             pygame.draw.rect(screen, wall_color, pygame.Rect(x, y, 8, sq * 2), border_radius=2)
 
@@ -722,10 +756,10 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
             dr1, dc1 = anchor_to_display_rc(wr, wc)
             if o == 'h':
                 x = left + dc1 * sq
-                y = top + dr1 * sq - 4
+                y = top + (dr1 + 1) * sq - 4
                 pygame.draw.rect(screen, preview_color, pygame.Rect(x, y, sq * 2, 8), border_radius=2)
             else:
-                x = left + dc1 * sq - 4
+                x = left + (dc1 + 1) * sq - 4
                 y = top + dr1 * sq
                 pygame.draw.rect(screen, preview_color, pygame.Rect(x, y, 8, sq * 2), border_radius=2)
 
