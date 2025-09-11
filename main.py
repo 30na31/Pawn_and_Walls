@@ -57,7 +57,7 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
         caption_label += f" ({your_color})"
     pygame.display.set_caption(caption_label)
     squares = 9
-    margin = 40  # visual padding around the board
+    margin = 60  # visual padding around the board (increased to avoid HUD overlap)
     # We'll recompute layout dynamically each frame using current window size
     def compute_layout():
         cur_w, cur_h = screen.get_size()
@@ -77,7 +77,14 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
     title_text = FONT.render("Press ESC to return", True, LABEL)
 
     # Load piece images once (scaled to square size)
-    base_dir = os.path.dirname(__file__)
+    # Resolve base dir for assets so it works when packaged with PyInstaller
+    try:
+        if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+            base_dir = sys._MEIPASS  # type: ignore[attr-defined]
+        else:
+            base_dir = os.path.dirname(__file__)
+    except Exception:
+        base_dir = os.path.dirname(__file__)
     white_pawn_path = os.path.join(base_dir, "white pawn.png")
     black_pawn_path = os.path.join(base_dir, "black pawn.png")
 
@@ -108,6 +115,9 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
     walls_remaining = {"white": max_walls_per_player, "black": max_walls_per_player}
     placing_wall = False
     wall_preview: Optional[Tuple[str, int, int]] = None  # (orientation, r, c)
+    # Transient UI message for invalid wall placement (path blocked)
+    wall_error_msg: Optional[str] = None
+    wall_error_ts: int = 0
 
     # Turn management: white starts
     turn: str = "white"
@@ -345,27 +355,43 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
         if orientation == 'h':
             if not (0 <= r <= squares - 2 and 0 <= c <= squares - 2):
                 return False
-            # Disallow if same horizontal already or a vertical already occupies that anchor (no crossing/overlap)
-            if (r, c) in horizontal_walls or (r, c) in vertical_walls:
+            # Disallow duplicate horizontal, overlapping adjacent horizontals (c-1 or c+1 share a segment),
+            # and crossing with vertical at same anchor.
+            if (r, c) in horizontal_walls:
+                return False
+            if (r, c - 1) in horizontal_walls:
+                return False
+            if (r, c + 1) in horizontal_walls:
+                return False
+            if (r, c) in vertical_walls:
                 return False
             return True
         elif orientation == 'v':
             if not (0 <= r <= squares - 2 and 0 <= c <= squares - 2):
                 return False
-            if (r, c) in vertical_walls or (r, c) in horizontal_walls:
+            # Disallow duplicate vertical, overlapping adjacent verticals (r-1 or r+1 share a segment),
+            # and crossing with horizontal at same anchor.
+            if (r, c) in vertical_walls:
+                return False
+            if (r - 1, c) in vertical_walls:
+                return False
+            if (r + 1, c) in vertical_walls:
+                return False
+            if (r, c) in horizontal_walls:
                 return False
             return True
         else:
             return False
 
     def place_wall(orientation: str, r: int, c: int, color: str, remote: bool = False) -> bool:
+        nonlocal wall_error_msg, wall_error_ts
         # Remote placements: trust sender (bounds-check only) to avoid desync
         if remote:
             if orientation not in ("h", "v"):
                 return False
             if not (0 <= r <= squares - 2 and 0 <= c <= squares - 2):
                 return False
-            # Only apply if not already present to avoid double toggles and double decrements
+            # Only apply if not already present to avoid double effects
             if orientation == 'h':
                 if (r, c) in horizontal_walls:
                     return False
@@ -403,30 +429,31 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
             print(f"[debug wall] placed {orientation} anchor=({r},{c}) color={color} flip={flip_view} -> display_anchor=({drw},{dcw})")
         except Exception:
             pass
-        # Local: ensure both sides still can reach goals
-        if not remote:
-            # Ensure both sides still can reach goals
-            def has_path(start: Tuple[int, int], target_rows: set[int]) -> bool:
-                from collections import deque
-                seen = {start}
-                dq = deque([start])
-                while dq:
-                    cr, cc = dq.popleft()
-                    if cr in target_rows:
-                        return True
-                    for nr, nc in legal_moves(cr, cc):
-                        if (nr, nc) not in seen:
-                            seen.add((nr, nc))
-                            dq.append((nr, nc))
-                return False
-            white_ok = has_path(positions['white'], {0})
-            black_ok = has_path(positions['black'], {squares - 1})
-            if not (white_ok and black_ok):
-                if orientation == 'h':
-                    horizontal_walls.discard((r, c))
-                else:
-                    vertical_walls.discard((r, c))
-                return False
+        # Ensure both sides still can reach goals (local only)
+        def has_path(start: Tuple[int, int], target_rows: set[int]) -> bool:
+            from collections import deque
+            seen = {start}
+            dq = deque([start])
+            while dq:
+                cr, cc = dq.popleft()
+                if cr in target_rows:
+                    return True
+                for nr, nc in legal_moves(cr, cc):
+                    if (nr, nc) not in seen:
+                        seen.add((nr, nc))
+                        dq.append((nr, nc))
+            return False
+        white_ok = has_path(positions['white'], {0})
+        black_ok = has_path(positions['black'], {squares - 1})
+        if not (white_ok and black_ok):
+            if orientation == 'h':
+                horizontal_walls.discard((r, c))
+            else:
+                vertical_walls.discard((r, c))
+            # Show message to the local player
+            wall_error_msg = "The wall can't be placed here Idiot!!"
+            wall_error_ts = pygame.time.get_ticks()
+            return False
         # Deduct count (also for remote so UI stays in sync)
         if walls_remaining[color] > 0:
             walls_remaining[color] -= 1
@@ -714,7 +741,7 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
         walls_text = f"Walls W:{walls_remaining['white']} B:{walls_remaining['black']}  (W=wall, Shift=vertical)"
         score_surf = FONT.render(score_text, True, LABEL)
         walls_surf = FONT.render(walls_text, True, LABEL)
-        bl_margin = 12
+        bl_margin = 18
         cur_w, cur_h = screen.get_size()
         walls_y = cur_h - bl_margin - walls_surf.get_height()
         score_y = walls_y - 4 - score_surf.get_height()
@@ -839,6 +866,10 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
         # Footer layout (turn + helper/disconnect) stacked without overlap
         cur_w, cur_h = screen.get_size()
         turn_surf = FONT.render(turn_msg, True, LABEL)
+
+        if wall_error_msg and (now_ms - wall_error_ts) <= 2000:
+            err_surf = BIG.render(wall_error_msg, True, (200, 60, 60))
+            screen.blit(err_surf, (cur_w // 2 - err_surf.get_width() // 2, base_y - err_surf.get_height() - 6))
 
         if opponent_left.is_set():
             second_surf = BIG.render("Opponent disconnected. Press ESC.", True, (200, 60, 60))
