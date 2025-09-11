@@ -634,15 +634,10 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
                         orientation = 'v'
                     dc = (mx - left) // sq
                     dr = (my - top) // sq
-                    # For flipped view we render walls at display_row = anchor_row + 2
-                    # so invert that when mapping cursor -> anchor (shift up by 2)
-                    adj_dr = dr
-                    if flip_view:
-                        adj_dr = dr - 1
-                    if 0 <= adj_dr < squares-1 and 0 <= dc < squares-1:
-                        lr, lc = anchor_from_display_rc(int(adj_dr), int(dc))
-                        if can_place_wall(orientation, lr, lc):
-                            wall_preview = (orientation, lr, lc)
+                    if 0 <= dr < squares-1 and 0 <= dc < squares-1:
+                        ar, ac = anchor_from_display_rc(int(dr), int(dc))
+                        if can_place_wall(orientation, ar, ac):
+                            wall_preview = (orientation, ar, ac)
                         else:
                             wall_preview = None
                     else:
