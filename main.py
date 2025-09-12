@@ -52,8 +52,42 @@ server_text = ""
 
 clock = pygame.time.Clock()
 
-SERVER_HOST = "127.0.0.1"
-SERVER_PORT = 5000
+server_host = "127.0.0.1"
+server_port = 5000
+
+# Allow overriding server via CLI or env (for remote connections)
+def _parse_server_endpoint(text: str) -> tuple[str, int]:
+    host = server_host
+    port = server_port
+    s = (text or "").strip()
+    if not s:
+        return host, port
+    try:
+        if ":" in s:
+            h, p = s.rsplit(":", 1)
+            if h:
+                host = h.strip()
+            if p:
+                port = int(p.strip())
+        elif s.isdigit():
+            port = int(s)
+        else:
+            host = s
+    except Exception:
+        # Keep defaults if parsing fails
+        pass
+    return host, port
+
+# Env var: PAWN_SERVER="host:port" or just host or just port
+_env_server = os.environ.get("PAWN_SERVER")
+if _env_server:
+    server_host, server_port = _parse_server_endpoint(_env_server)
+
+# CLI arg: --server host:port (or just host or port)
+for i, arg in enumerate(sys.argv):
+    if arg == "--server" and i + 1 < len(sys.argv):
+        server_host, server_port = _parse_server_endpoint(sys.argv[i + 1])
+        break
 
 def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional[socket.socket] = None) -> None:
     # Draw a 9x9 chessboard (green/white) centered on the screen
