@@ -18,6 +18,7 @@ class Client:
 		self.peer: Optional["Client"] = None
 		self.role: Optional[str] = None  # 'white' | 'black'
 		self.ready: threading.Event = threading.Event()
+		self.wants_rematch: bool = False
 
 
 waiting_any: List[Client] = []
@@ -204,7 +205,33 @@ def handle_client(conn: socket.socket, addr: Tuple[str, int]) -> None:
 					if isinstance(payload, dict):
 						payload_dict: Dict[str, Any] = cast(Dict[str, Any], payload)
 						p_type = str(payload_dict.get("type") or "")
-						if p_type in ("move", "wall", "rematch", "rematch_start", "win"):
+						# Handle coordinated rematch: when both sides request rematch, assign colors randomly
+						if p_type == "rematch":
+							me.wants_rematch = True
+							peer = me.peer
+							if peer and peer.wants_rematch:
+								# both want rematch -> assign colors randomly and notify both
+								if random.random() < 0.5:
+									white_client, black_client = me, peer
+								else:
+									white_client, black_client = peer, me
+								white_client.role = "white"
+								black_client.role = "black"
+								white_client.wants_rematch = False
+								black_client.wants_rematch = False
+								try:
+									send_line(white_client.conn, {"type": "rematch_start", "you": "white", "opponent": black_client.name})
+									send_line(black_client.conn, {"type": "rematch_start", "you": "black", "opponent": white_client.name})
+									print(f"[server] rematch_start sent: white='{white_client.name}' vs black='{black_client.name}'")
+								except Exception as e:
+									print(f"[server] rematch_start send failed: {e}")
+							# also relay the info so UI can show 'opponent wants rematch'
+							try:
+								send_line(peer_conn, payload_dict)
+							except Exception:
+								pass
+							continue
+						if p_type in ("move", "wall", "rematch_start", "win"):
 							try:
 								print(f"[server] relay {p_type} from '{me.name}' to '{me.peer.name}': {payload_dict}")
 								send_line(peer_conn, payload_dict)
