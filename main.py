@@ -30,6 +30,7 @@ input_w, input_h = 360, 44
 button_w, button_h = 140, 44
 
 label_surf = FONT.render("Username", True, LABEL)
+server_label_surf = FONT.render("Server", True, LABEL)
 
 label_pos = [WIDTH // 2 - label_surf.get_width() // 2, 24]
 
@@ -37,20 +38,22 @@ input_rect = pygame.Rect(0, 0, input_w, input_h)
 input_rect.centerx = WIDTH // 2
 input_rect.top = label_pos[1] + label_surf.get_height() + 12
 
+server_input_rect = pygame.Rect(0, 0, input_w, input_h)
+server_input_rect.centerx = WIDTH // 2
+server_input_rect.top = input_rect.bottom + 28
+
 button_rect = pygame.Rect(0, 0, button_w, button_h)
 button_rect.centerx = WIDTH // 2
-button_rect.top = input_rect.bottom + 12
+button_rect.top = server_input_rect.bottom + 16
 
-active = False
+active_field: Optional[str] = None  # 'name' | 'server'
 text = ""
+server_text = ""
 
 clock = pygame.time.Clock()
 
-SERVER_HOST = os.getenv("PAWN_SERVER_HOST", "127.0.0.1")
-try:
-    SERVER_PORT = int(os.getenv("PAWN_SERVER_PORT", "5000"))
-except Exception:
-    SERVER_PORT = 5000
+SERVER_HOST = "127.0.0.1"
+SERVER_PORT = 5000
 
 def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional[socket.socket] = None) -> None:
     # Draw a 9x9 chessboard (green/white) centered on the screen
@@ -79,6 +82,12 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
     # Small title text (optional)
     title_text = FONT.render("Press ESC to return", True, LABEL)
 
+    # Parse player names from label for HUD
+    if " vs " in name_value:
+        my_name, opp_name = name_value.split(" vs ", 1)
+    else:
+        my_name, opp_name = name_value, "Opponent"
+
     # Load piece images once (scaled to square size)
     # Resolve base dir for assets so it works when packaged with PyInstaller
     try:
@@ -88,8 +97,8 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
             base_dir = os.path.dirname(__file__)
     except Exception:
         base_dir = os.path.dirname(__file__)
-    white_pawn_path = os.path.join(base_dir, "white pawn.png")
-    black_pawn_path = os.path.join(base_dir, "black pawn.png")
+    white_pawn_path = os.path.join(base_dir, "white pawn.png")  # type: ignore
+    black_pawn_path = os.path.join(base_dir, "black pawn.png")  # type: ignore
 
     def load_piece(path: str, size: int):
         try:
@@ -466,7 +475,7 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
         if not sock:
             return
         # Access outer state variables we mutate
-        nonlocal rematch_remote_request, rematch_local_request, game_over, winner_color, winner_name, win_announced, score_updated_for_game, turn, white_score, black_score
+        nonlocal rematch_remote_request, rematch_local_request, game_over, winner_color, winner_name, win_announced, score_updated_for_game, turn, white_score, black_score, your_color, flip_view
         sock.settimeout(0.5)
         buf: bytes = b""
         while True:
@@ -504,21 +513,24 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
                                     if turn == w_color:
                                         turn = 'white' if w_color == 'black' else 'black'
                         elif p_type == "rematch":
-                            print("[client] rematch request received")
-                            rematch_remote_request = True
-                            if rematch_local_request:
-                                # Both agreed; send start signal to ensure sync
-                                print("[client] both sides requested rematch -> sending rematch_start")
-                                try:
-                                    if sock:
-                                        sock.sendall(json.dumps({"type": "rematch_start"}).encode("utf-8") + b"\n")
-                                except Exception:
-                                    pass
-                                reset_game_state()
+                            # Only show remote rematch request if the game is over.
+                            # During an active game, ignore to avoid stale "Accept" state after reset.
+                            if game_over:
+                                print("[client] rematch request received")
+                                rematch_remote_request = True
+                            # Wait for server to send rematch_start with randomized colors
                         elif p_type == "rematch_start":
-                            print("[client] rematch_start received -> resetting game state")
+                            # Server-coordinated rematch start with color assignment
+                            new_you = payload.get("you")
+                            if isinstance(new_you, str) and new_you in ("white", "black"):
+                                your_color = new_you
+                                flip_view = (your_color == "black")
+                            print("[client] rematch_start received -> resetting game state, you=", your_color)
                             reset_game_state()
                             turn = "white"
+                            # Clear any rematch request flags so button resets to default
+                            rematch_local_request = False
+                            rematch_remote_request = False
                         elif p_type == "win":
                             # Opponent announced a win
                             winner_color_msg = payload.get("winner_color")
@@ -603,13 +615,8 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
                                     sock.sendall(json.dumps({"type": "rematch"}).encode("utf-8") + b"\n")
                                 except Exception:
                                     pass
-                            if rematch_remote_request:
-                                if sock:
-                                    try:
-                                        sock.sendall(json.dumps({"type": "rematch_start"}).encode("utf-8") + b"\n")
-                                    except Exception:
-                                        pass
-                                reset_game_state()
+                            # Wait for server to send rematch_start
+                            pass
                     else:
                         # Exit to entry screen
                         running_board = False
@@ -635,12 +642,8 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
                             except Exception:
                                 pass
                     if rematch_remote_request:
-                        if sock:
-                            try:
-                                sock.sendall(json.dumps({"type": "rematch_start"}).encode("utf-8") + b"\n")
-                            except Exception:
-                                pass
-                        reset_game_state()
+                        # Wait for server to send rematch_start
+                        pass
                     continue  # handled click
                 if game_over:
                     # Treat board click as implicit rematch request
@@ -652,12 +655,8 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
                             except Exception:
                                 pass
                     if rematch_remote_request:
-                        if sock:
-                            try:
-                                sock.sendall(json.dumps({"type": "rematch_start"}).encode("utf-8") + b"\n")
-                            except Exception:
-                                pass
-                        reset_game_state()
+                        # Wait for server to send rematch_start
+                        pass
                     continue  # don't allow moving during game over
                 mx, my = event.pos
                 # If placing wall, commit placement based on preview
@@ -713,17 +712,17 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
                 else:
                     mx, my = event.pos
                     dest = mouse_to_logical(mx, my)
-                    yours = drag_color or (your_color or "white")
+                    yours = drag_color or (your_color or "white") # type: ignore
                     from_rc = positions[yours]
                     lm = legal_moves(*from_rc)
                     if dest is not None:
                         row, col = dest
                         if (row, col) in lm:
                             positions[yours] = (row, col)
-                            send_move(from_rc, (row, col), yours)
-                            last_move = (yours, (row, col), pygame.time.get_ticks())
+                            send_move(from_rc, (row, col), yours) # type: ignore
+                            last_move = (yours, (row, col), pygame.time.get_ticks()) #type: ignore
                             turn = "black" if yours == "white" else "white"
-                            check_and_set_victory(trigger_color=yours, announce=True)
+                            check_and_set_victory(trigger_color=yours, announce=True) # type: ignore
                     dragging = False
                     drag_color = None
 
@@ -740,7 +739,15 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
             label_y = max(5, top - 40)
             screen.blit(name_surf, (cur_w // 2 - name_surf.get_width() // 2, label_y))
         # Bottom-left anchored scoreboard & walls info
-        score_text = f"White {white_score} - {black_score} Black"
+        # Show names instead of colors in the score HUD
+        if your_color in ("white", "black"):
+            if your_color == "white":
+                white_name, black_name = my_name, opp_name
+            else:
+                white_name, black_name = opp_name, my_name
+        else:
+            white_name, black_name = "White", "Black"
+        score_text = f"{white_name} {white_score} - {black_score} {black_name}"
         walls_text = f"Walls W:{walls_remaining['white']} B:{walls_remaining['black']}  (W=wall, Shift=vertical)"
         score_surf = FONT.render(score_text, True, LABEL)
         walls_surf = FONT.render(walls_text, True, LABEL)
@@ -985,7 +992,7 @@ def matchmaking_screen(player_name: str):
     def worker(name: str, pref: str):
         nonlocal result, err
         try:
-            s = socket.create_connection((SERVER_HOST, SERVER_PORT), timeout=5.0)
+            s = socket.create_connection((server_host, server_port), timeout=5.0)
             sock_ref[0] = s
             line = json.dumps({"type": "join", "name": name, "pref": pref}).encode("utf-8") + b"\n"
             s.sendall(line)
@@ -1110,25 +1117,42 @@ while True:
             input_rect.centerx = WIDTH // 2
             input_rect.top = label_pos[1] + label_surf.get_height() + 12
             button_rect.centerx = WIDTH // 2
-            button_rect.top = input_rect.bottom + 12
+            button_rect.top = server_input_rect.bottom + 16
 
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             if input_rect.collidepoint(event.pos):
-                active = True
+                active_field = 'name'
+            elif server_input_rect.collidepoint(event.pos):
+                active_field = 'server'
             else:
-                active = False
+                active_field = None
 
             if button_rect.collidepoint(event.pos):
+                h, p = _parse_server_endpoint(server_text)
+                server_host, server_port = h, p
                 matchmaking_screen(text)
 
-        if event.type == pygame.KEYDOWN and active:
-            if event.key == pygame.K_RETURN:
-                matchmaking_screen(text)
-            elif event.key == pygame.K_BACKSPACE:
-                text = text[:-1]
-            else:
-                if event.unicode.isprintable():
-                    text += event.unicode
+        if event.type == pygame.KEYDOWN:
+            if active_field == 'name':
+                if event.key == pygame.K_RETURN:
+                    h, p = _parse_server_endpoint(server_text)
+                    server_host, server_port = h, p
+                    matchmaking_screen(text)
+                elif event.key == pygame.K_BACKSPACE:
+                    text = text[:-1]
+                else:
+                    if event.unicode.isprintable():
+                        text += event.unicode
+            elif active_field == 'server':
+                if event.key == pygame.K_RETURN:
+                    h, p = _parse_server_endpoint(server_text)
+                    server_host, server_port = h, p
+                    matchmaking_screen(text)
+                elif event.key == pygame.K_BACKSPACE:
+                    server_text = server_text[:-1]
+                else:
+                    if event.unicode.isprintable():
+                        server_text += event.unicode
 
     screen.fill(BG)
 
@@ -1138,27 +1162,32 @@ while True:
     else:
         pygame.display.set_caption("Name Entry")
 
-    # Label
+    # Labels
     screen.blit(label_surf, tuple(label_pos))
+    srv_label_pos = (WIDTH // 2 - server_label_surf.get_width() // 2, input_rect.bottom + 6)
+    screen.blit(server_label_surf, srv_label_pos)
 
-    # Input box
+    # Input boxes
+    # Username
     pygame.draw.rect(screen, INPUT_BG, input_rect, border_radius=6)
-    pygame.draw.rect(
-        screen,
-        BORDER_ACTIVE if active else BORDER_INACTIVE,
-        input_rect,
-        width=2,
-        border_radius=6
-    )
+    pygame.draw.rect(screen, BORDER_ACTIVE if active_field == 'name' else BORDER_INACTIVE, input_rect, width=2, border_radius=6)
     txt_surf = BIG.render(text, True, TEXT)
-    # Keep text inside the box
-    clip = txt_surf.get_rect()
-    clip.width = input_rect.width - 12
+    clip = txt_surf.get_rect(); clip.width = input_rect.width - 12
     screen.set_clip(input_rect.inflate(-12, -8))
     screen.blit(txt_surf, (input_rect.x + 8, input_rect.y + 6))
     screen.set_clip(None)
 
-    # Removed server address input; fixed localhost settings
+    # Server
+    pygame.draw.rect(screen, INPUT_BG, server_input_rect, border_radius=6)
+    pygame.draw.rect(screen, BORDER_ACTIVE if active_field == 'server' else BORDER_INACTIVE, server_input_rect, width=2, border_radius=6)
+    display_srv = server_text or f"{server_host}:{server_port}"
+    srv_txt = BIG.render(display_srv, True, TEXT)
+    clip2 = srv_txt.get_rect(); clip2.width = server_input_rect.width - 12
+    screen.set_clip(server_input_rect.inflate(-12, -8))
+    screen.blit(srv_txt, (server_input_rect.x + 8, server_input_rect.y + 6))
+    screen.set_clip(None)
+
+    # Server address can be edited in the input above; defaults via env/CLI or 127.0.0.1:5000
 
     # Submit button
     pygame.draw.rect(screen, BUTTON_BG, button_rect, border_radius=6)
