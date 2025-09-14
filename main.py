@@ -46,8 +46,11 @@ text = ""
 
 clock = pygame.time.Clock()
 
-SERVER_HOST = "127.0.0.1"
-SERVER_PORT = 5000
+SERVER_HOST = os.getenv("PAWN_SERVER_HOST", "127.0.0.1")
+try:
+    SERVER_PORT = int(os.getenv("PAWN_SERVER_PORT", "5000"))
+except Exception:
+    SERVER_PORT = 5000
 
 def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional[socket.socket] = None) -> None:
     # Draw a 9x9 chessboard (green/white) centered on the screen
