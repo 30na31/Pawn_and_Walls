@@ -55,7 +55,7 @@ clock = pygame.time.Clock()
 server_host = "127.0.0.1"
 server_port = 5000
 
-# Allow overriding server via CLI or env (for remote connections)
+
 def _parse_server_endpoint(text: str) -> tuple[str, int]:
     host = server_host
     port = server_port
@@ -74,35 +74,30 @@ def _parse_server_endpoint(text: str) -> tuple[str, int]:
         else:
             host = s
     except Exception:
-        # Keep defaults if parsing fails
         pass
     return host, port
 
-# Env var: PAWN_SERVER="host:port" or just host or just port
 _env_server = os.environ.get("PAWN_SERVER")
 if _env_server:
     server_host, server_port = _parse_server_endpoint(_env_server)
 
-# CLI arg: --server host:port (or just host or port)
 for i, arg in enumerate(sys.argv):
     if arg == "--server" and i + 1 < len(sys.argv):
         server_host, server_port = _parse_server_endpoint(sys.argv[i + 1])
         break
 
 def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional[socket.socket] = None) -> None:
-    # Draw a 9x9 chessboard (green/white) centered on the screen
-    # Update window caption for board
+
     caption_label = name_value
     if your_color:
         caption_label += f" ({your_color})"
     pygame.display.set_caption(caption_label)
     squares = 9
-    margin = 60  # visual padding around the board (increased to avoid HUD overlap)
-    # We'll recompute layout dynamically each frame using current window size
+    margin = 60  
     def compute_layout():
         cur_w, cur_h = screen.get_size()
         board_size = min(cur_w, cur_h) - margin * 2
-        board_size = max(board_size, squares * 30)  # minimum reasonable size
+        board_size = max(board_size, squares * 30) 
         sq_ = board_size // squares
         board_size = sq_ * squares
         left_ = (cur_w - board_size) // 2
@@ -113,17 +108,13 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
     GREEN = (118, 150, 86)
     WHITE = (255, 255, 255)
 
-    # Small title text (optional)
     title_text = FONT.render("Press ESC to return", True, LABEL)
 
-    # Parse player names from label for HUD
     if " vs " in name_value:
         my_name, opp_name = name_value.split(" vs ", 1)
     else:
         my_name, opp_name = name_value, "Opponent"
 
-    # Load piece images once (scaled to square size)
-    # Resolve base dir for assets so it works when packaged with PyInstaller
     try:
         if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
             base_dir = sys._MEIPASS  # type: ignore[attr-defined]
@@ -154,40 +145,35 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
         "black": (row_9, col_e),
     }
 
-    # Walls (each player up to 9). We'll implement simple Quoridor-like walls.
+
     horizontal_walls: set[Tuple[int, int]] = set()  # anchors for horizontal walls
     vertical_walls: set[Tuple[int, int]] = set()    # anchors for vertical walls
     max_walls_per_player = 9
     walls_remaining = {"white": max_walls_per_player, "black": max_walls_per_player}
     placing_wall = False
     wall_preview: Optional[Tuple[str, int, int]] = None  # (orientation, r, c)
-    # Transient UI message for invalid wall placement (path blocked)
     wall_error_msg: Optional[str] = None
     wall_error_ts: int = 0
 
-    # Turn management: white starts
+    # Turn management
     turn: str = "white"
 
-    # View orientation: flip for black so they see their pawn from the bottom
+    # View orientation
     flip_view: bool = (your_color == "black")
 
-    # Helpers to map between logical board (r,c) and displayed squares depending on flip
     def to_display_rc(r: int, c: int) -> Tuple[int, int]:
         if not flip_view:
             return r, c
         return (squares - 1 - r, squares - 1 - c)
 
     def from_display_rc(dr: int, dc: int) -> Tuple[int, int]:
-        # inverse of to_display_rc (same when rotating 180 degrees)
+        # inverse of to_display_rc 
         if not flip_view:
             return dr, dc
         return (squares - 1 - dr, squares - 1 - dc)
 
-    # Anchor helpers (anchors live on (squares-1) x (squares-1) grid)
+
     def anchor_to_display_rc(r: int, c: int) -> Tuple[int, int]:
-        """Convert logical anchor (r,c) to display anchor.
-        Anchor grid is (squares-1) x (squares-1). For flipped view we 180-rotate anchors
-        without extra offsets so (0,0)->(s-2,s-2)."""
         if not flip_view:
             return r, c
         return ( (squares - 2) - r, (squares - 2) - c )
@@ -205,37 +191,33 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
             return (r, c)
         return None
 
-    # Drag state
     dragging = False
     drag_color: Optional[str] = None
     drag_offset = (0, 0)
     drag_pos_px = (0, 0)
 
-    # Networking: listener for opponent moves
+
     state_lock = threading.Lock()
     pending_moves: List[Dict[str, Any]] = []
     opponent_left = threading.Event()
 
-    # Visual feedback: remember last move (color, to_rc) with a fade timer
-    last_move: Optional[Tuple[str, Tuple[int, int], int]] = None  # (color, to, timestamp_ms)
 
-    # Rematch coordination flags
+    last_move: Optional[Tuple[str, Tuple[int, int], int]] = None  
+
+
     rematch_local_request = False
     rematch_remote_request = False
 
-    # Win state
     game_over = False
     winner_color: Optional[str] = None
     winner_name: Optional[str] = None
     win_announced = False
-    # Scores (persist for lifetime of this board session across rematches)
     white_score = 0
     black_score = 0
     score_updated_for_game = False
 
     def check_and_set_victory(trigger_color: Optional[str] = None, announce: bool = True):
-        """Check victory conditions after a move and announce if needed.
-        White wins if reaches row 0; Black wins if reaches last row (squares-1)."""
+
         nonlocal game_over, winner_color, winner_name, win_announced, white_score, black_score, score_updated_for_game
         if game_over:
             return
@@ -248,34 +230,30 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
             game_over = True
             winner_color = "black"
         if game_over:
-            # Increment score exactly once
+            # Increment score 
             if not score_updated_for_game and winner_color in ("white", "black"):
                 if winner_color == "white":
                     white_score += 1
                 else:
                     black_score += 1
                 score_updated_for_game = True
-            # Assign winner name: if local knows player's own color
             if your_color == winner_color:
                 # local player won
-                # Extract own displayed name (before ' vs ' if combined)
                 if " vs " in name_value:
                     winner = name_value.split(" vs ", 1)[0] if your_color in ("white", "black") else name_value
                 else:
                     winner = name_value
                 winner_name = winner
             else:
-                # Opponent possibly won; try parse name_value 'player vs opponent'
+                # Opponent possibly won
                 if " vs " in name_value:
                     parts = name_value.split(" vs ", 1)
                     if your_color in ("white", "black"):
-                        # your opponent name is after vs
                         winner_name = parts[1]
                     else:
                         winner_name = parts[0]
                 else:
                     winner_name = "Opponent"
-            # Announce to peer if we originated the move or explicitly triggered
             if announce and sock and not win_announced:
                 try:
                     msg = {"type": "win", "winner_color": winner_color, "winner_name": winner_name} # type: ignore
@@ -305,39 +283,34 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
         wall_preview = None
 
     def legal_moves(r: int, c: int) -> List[Tuple[int, int]]:
-        # Cardinal step moves
+        # cardinal step moves
         deltas = [(-1, 0), (1, 0), (0, -1), (0, 1)]
         step_candidates = [(r + dr, c + dc) for dr, dc in deltas]
         in_bounds_steps = [(rr, cc) for rr, cc in step_candidates if 0 <= rr < squares and 0 <= cc < squares]
 
         occ = {positions["white"], positions["black"]}
-        # Wall blocking helper
+        # wall blocking helper
         def blocked(a: Tuple[int, int], b: Tuple[int, int]) -> bool:
             ar, ac = a
             br, bc = b
             dr = br - ar
             dc = bc - ac
-            # Normalized anchors:
-            #  - horizontal wall at anchor (r,c) sits on the edge between rows r and r+1, spanning columns c..c+1
-            #  - vertical wall   at anchor (r,c) sits on the edge between cols c and c+1, spanning rows r..r+1
-            # Vertical pawn movement
+
             if dc == 0 and abs(dr) == 1:
-                if dr == -1:  # moving up: crossing edge between rows ar-1 and ar at column band ac-1..ac
+                if dr == -1:  
                     return (ar-1, ac if ac < squares-1 else ac-1) in horizontal_walls or (ar-1, ac-1) in horizontal_walls
-                else:  # moving down: crossing edge between rows ar and ar+1 at column band ac-1..ac
+                else:  
                     return (ar, ac if ac < squares-1 else ac-1) in horizontal_walls or (ar, ac-1) in horizontal_walls
             # Horizontal pawn movement
             if dr == 0 and abs(dc) == 1:
-                if dc == -1:  # moving left: crossing edge between cols ac-1 and ac at row band ar-1..ar
+                if dc == -1: 
                     return (ar if ar < squares-1 else ar-1, ac-1) in vertical_walls or (ar-1, ac-1) in vertical_walls
-                else:  # moving right: crossing edge between cols ac and ac+1 at row band ar-1..ar
+                else:  
                     return (ar if ar < squares-1 else ar-1, ac) in vertical_walls or (ar-1, ac) in vertical_walls
             return False
 
         moves: List[Tuple[int, int]] = [(rr, cc) for rr, cc in in_bounds_steps if (rr, cc) not in occ and not blocked((r, c), (rr, cc))]
 
-        # Jump rule: if opponent pawn is exactly one step away in a cardinal direction,
-        # you may jump over it to the next square if that landing square is in-bounds and empty.
         mover_color: Optional[str] = None
         if positions["white"] == (r, c):
             mover_color = "white"
@@ -358,7 +331,7 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
                         if not blocked((r, c), adj) and not blocked(adj, land):
                             moves.append(land)
 
-        # Remove duplicates while preserving order
+        # Remove duplicates 
         seen = set() # type: ignore
         uniq_moves: List[Tuple[int, int]] = []
         for m in moves:
@@ -385,7 +358,6 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
         except Exception:
             pass
 
-    # --- Wall networking & validation helpers ---
     def send_wall(orientation: str, r: int, c: int, color: str) -> None:
         if not sock:
             return
@@ -397,12 +369,9 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
             pass
 
     def can_place_wall(orientation: str, r: int, c: int) -> bool:
-        # Normalized anchors (Option 1): both orientations use 0 <= r,c <= squares-2
         if orientation == 'h':
             if not (0 <= r <= squares - 2 and 0 <= c <= squares - 2):
                 return False
-            # Disallow duplicate horizontal, overlapping adjacent horizontals (c-1 or c+1 share a segment),
-            # and crossing with vertical at same anchor.
             if (r, c) in horizontal_walls:
                 return False
             if (r, c - 1) in horizontal_walls:
@@ -415,8 +384,6 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
         elif orientation == 'v':
             if not (0 <= r <= squares - 2 and 0 <= c <= squares - 2):
                 return False
-            # Disallow duplicate vertical, overlapping adjacent verticals (r-1 or r+1 share a segment),
-            # and crossing with horizontal at same anchor.
             if (r, c) in vertical_walls:
                 return False
             if (r - 1, c) in vertical_walls:
@@ -431,13 +398,11 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
 
     def place_wall(orientation: str, r: int, c: int, color: str, remote: bool = False) -> bool:
         nonlocal wall_error_msg, wall_error_ts
-        # Remote placements: trust sender (bounds-check only) to avoid desync
         if remote:
             if orientation not in ("h", "v"):
                 return False
             if not (0 <= r <= squares - 2 and 0 <= c <= squares - 2):
                 return False
-            # Only apply if not already present to avoid double effects
             if orientation == 'h':
                 if (r, c) in horizontal_walls:
                     return False
@@ -455,12 +420,10 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
                 walls_remaining[color] -= 1
             return True
 
-        # Local placement requires available walls and must satisfy local rules
         if walls_remaining[color] <= 0:
             return False
         if not can_place_wall(orientation, r, c):
             return False
-        # Avoid duplicate adds as an extra safety guard
         if orientation == 'h':
             if (r, c) in horizontal_walls:
                 return False
@@ -475,7 +438,6 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
             print(f"[debug wall] placed {orientation} anchor=({r},{c}) color={color} flip={flip_view} -> display_anchor=({drw},{dcw})")
         except Exception:
             pass
-        # Ensure both sides still can reach goals (local only)
         def has_path(start: Tuple[int, int], target_rows: set[int]) -> bool:
             from collections import deque
             seen = {start}
@@ -500,7 +462,6 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
             wall_error_msg = "The wall can't be placed here Idiot!!"
             wall_error_ts = pygame.time.get_ticks()
             return False
-        # Deduct count (also for remote so UI stays in sync)
         if walls_remaining[color] > 0:
             walls_remaining[color] -= 1
         return True
@@ -508,7 +469,6 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
     def listen_loop():
         if not sock:
             return
-        # Access outer state variables we mutate
         nonlocal rematch_remote_request, rematch_local_request, game_over, winner_color, winner_name, win_announced, score_updated_for_game, turn, white_score, black_score, your_color, flip_view
         sock.settimeout(0.5)
         buf: bytes = b""
@@ -547,14 +507,10 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
                                     if turn == w_color:
                                         turn = 'white' if w_color == 'black' else 'black'
                         elif p_type == "rematch":
-                            # Only show remote rematch request if the game is over.
-                            # During an active game, ignore to avoid stale "Accept" state after reset.
                             if game_over:
                                 print("[client] rematch request received")
                                 rematch_remote_request = True
-                            # Wait for server to send rematch_start with randomized colors
                         elif p_type == "rematch_start":
-                            # Server-coordinated rematch start with color assignment
                             new_you = payload.get("you")
                             if isinstance(new_you, str) and new_you in ("white", "black"):
                                 your_color = new_you
@@ -562,7 +518,6 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
                             print("[client] rematch_start received -> resetting game state, you=", your_color)
                             reset_game_state()
                             turn = "white"
-                            # Clear any rematch request flags so button resets to default
                             rematch_local_request = False
                             rematch_remote_request = False
                         elif p_type == "win":
@@ -603,9 +558,7 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
 
     running_board = True
     while running_board:
-        # Recompute layout in case of window resize
         sq, board_size, left, top = compute_layout()
-        # First, apply any pending opponent moves so the UI reflects the latest state
         if sock is not None:
             with state_lock:
                 while pending_moves:
@@ -622,14 +575,11 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
                             to_list = cast(List[Any], to_any)
                             tr = (int(to_list[0]), int(to_list[1]))
                             positions[color] = tr
-                            # Record last move and log for clarity
                             last_move = (color, tr, pygame.time.get_ticks())
                             print(f"[client] received move: {color} -> {tr}")
-                            # Check if that move produced a victory (without re-announcing)
                             pre_go = game_over # type: ignore
                             check_and_set_victory(trigger_color=color, announce=False)
                             if not game_over:
-                                # Toggle turn only if game not ended
                                 turn = "black" if color == "white" else "white"
                         except Exception:
                             pass
@@ -762,7 +712,6 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
 
         screen.fill(BG)
 
-        # Optional: show the entered name at the top if provided plus score (top-left)
         cur_w, _cur_h = screen.get_size()
         if name_value:
             label = str(name_value)
@@ -886,8 +835,7 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
             else:
                 pygame.draw.circle(screen, (255, 0, 0), (drag_pos_px[0], drag_pos_px[1]), sq // 3)
 
-        # Helper text
-        # Turn status message (UX hint)
+
         if game_over:
             if winner_color in ("white", "black") and your_color in ("white", "black"): # type: ignore
                 if winner_color == your_color:
@@ -907,7 +855,6 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
             else:
                 # local/offline: show whose move
                 turn_msg = f"{turn.title()}'s move"
-        # Footer layout (turn + helper/disconnect) stacked without overlap
         cur_w, cur_h = screen.get_size()
         turn_surf = FONT.render(turn_msg, True, LABEL)
 
@@ -976,7 +923,6 @@ def draw_board(name_value: str, your_color: Optional[str] = None, sock: Optional
         screen.blit(r_txt, (rematch_rect.centerx - r_txt.get_width() // 2, rematch_rect.centery - r_txt.get_height() // 2))
 
         # Helper text / opponent status
-    # (Old footer drawing replaced by stacked logic above)
 
         pygame.display.flip()
         clock.tick(60)
@@ -1143,7 +1089,6 @@ while True:
             pygame.quit()
             sys.exit()
         if event.type == pygame.VIDEORESIZE:
-            # Update global width/height and recreate display surface
             WIDTH, HEIGHT = event.w, event.h # type: ignore
             screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.RESIZABLE)
             # Recenter UI elements

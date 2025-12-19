@@ -34,24 +34,20 @@ def send_line(conn: socket.socket, obj: Dict[str, Any]) -> None:
 
 
 def try_match(new_client: Client) -> Optional[Tuple[Client, Client]]:
-	"""Try to find a match for new_client under q_lock.
-	Return tuple (white_client, black_client) or None.
-	"""
 	def pop_other(lst: List[Client], exclude: Client) -> Optional[Client]:
-		# pop the first client that is not the exclude
+		# pop the first client 
 		for i, c in enumerate(lst):
 			if c is not exclude:
 				return lst.pop(i)
 		return None
 
 	if new_client.pref == "white":
-		# Prefer complement, then any, then same
+		# Prefer complement
 		other = pop_other(waiting_black, new_client) or pop_other(waiting_any, new_client)
 		if other:
 			return new_client, other
 		other = pop_other(waiting_white, new_client)
 		if other:
-			# Both wanted white; assign new_client white, other black
 			return new_client, other
 		if new_client not in waiting_white:
 			waiting_white.append(new_client)
